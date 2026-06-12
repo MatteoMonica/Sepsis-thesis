@@ -1,0 +1,8 @@
+Data/
+*.csv
+*.xlsx
+*.pdf
+__pycache__/
+*.pyc
+.venv/
+venv/
