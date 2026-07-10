@@ -47,8 +47,8 @@ def evaluetion_metrics(y_true,y_pred):
     return{"AUROC":auroc,"AUPRC":auprc,"Accuracy":accuracy,"F1 Score":f1}
 
 #sto calcolando i punteggi da dare come nel paper
-def calcola_punteggio(hours_to_sepsis,prediction):
-    if pd.isna(hours_to_sepsis):
+def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
+    if is_sepsis == False:
         if prediction == 1:
             return -0.05
         else:
@@ -75,6 +75,19 @@ def calcola_punteggio(hours_to_sepsis,prediction):
             else:
                 return -2    
 
+#sto normalizzando i punteggicome nel paper
+def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
+   #è il punteggio reale del modello con le sue predizioni
+   U_totale = sum([calcola_punteggio(ore, pred, sepsi) for ore, pred, sepsi in zip(hours_to_sepsis_list, prediction, is_sepsis_list)])
+
+   #questo è il punteggio nel caso peggiore in cui non predice mai sepsi(cioè il punto di partenza)
+   U_no_predictions=sum([calcola_punteggio(ore, 0, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
+
+   #questo è il punteggio se il modello predice sempre sepsi (cioè il massimo che posso avere)
+   U_optimal=sum([calcola_punteggio(ore,1,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
+
+   #qua sto facendo la nomralizzazione cioè quanto si avvicina il modello al punteggio ottimale(optimal), partendo dal base(no_prediction) e il punteggio sarà tra 0 e 1
+   return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
 
 #leggo il mio file 
 file= pd.read_csv("sepsis3_hourly_labeled.csv")
@@ -203,38 +216,41 @@ t_lstm=(lstm.predict(X_val_seq)>0.5).astype(int)#NB keras a differenza di XGBoos
 t_test_lstm=(lstm.predict(X_test_seq)>0.5).astype(int)
 
 #Risultati del Validation Set
+print("\n ---------- Validation Set ----------")
 print("\nXGBOOST: ")
 evaluetion_metrics(Y_val,t)
-#faccio assegnare i punteggi ai modelli (in ore c'è il valore di hours_to sepsis, in pred la prediction) con zip le metto assieme, t sono le predizioni di XGBoost
-punteggi_xgb=[calcola_punteggio(ore,pred) for ore,pred in zip(validation_set["hours_to_sepsis"],t)]
-print("Media utilità clinica XGBoost:", sum(punteggi_xgb) / len(punteggi_xgb))
+# calcolo l'utilità clinica normalizzata, passo le ore mancanti alla sepsi, se il paziente è settico e le predizioni del modello t sono le predizioni di XGBoost
+punteggi_xgb = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], t)
+print("Utilità clinica normalizzata XGBoost:", punteggi_xgb)
 
 print("\nMLP: ")
 evaluetion_metrics(Y_val,t_mlp)
-punteggi_mlp=[calcola_punteggio(ore,pred) for ore,pred in zip(validation_set["hours_to_sepsis"],t_mlp)]
-print("Media utilità clinica MLP:", sum(punteggi_mlp) / len(punteggi_mlp))
+punteggi_mlp = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"],t_mlp)
+print("Media utilità clinica MLP:", punteggi_mlp)
 
 print("\nLSTM: ")
 evaluetion_metrics(Y_val_seq,t_lstm)
 #la LSTM lavora su sequenze per paziente quindi ho una sola predizione e non una per ogni singola ora 
 hours_val = validation_set.groupby("subject_id")["hours_to_sepsis"].last()
-punteggi_lstm = [calcola_punteggio(ore, pred) for ore, pred in zip(hours_val, t_lstm)]
-print("Media utilità clinica LSTM:", sum(punteggi_lstm) / len(punteggi_lstm))
+is_sepsis_val = validation_set.groupby("subject_id")["is_sepsis"].last()
+punteggi_lstm = normalizza_punteggio(hours_val,is_sepsis_val,t_lstm)
+print("Media utilità clinica LSTM:", punteggi_lstm)
 
 print("\n ---------- Test Set ----------")
 #Risultati del Test Set
 print("\nXGBOOST Test Set: ")
 evaluetion_metrics(Y_test,t_test_xgb)
-punteggi_xgb_test=[calcola_punteggio(ore,pred) for ore,pred in zip(test_set["hours_to_sepsis"],t_test_xgb)]
-print("Media utilità clinica XGBoost Test set:", sum(punteggi_xgb_test) / len(punteggi_xgb_test))
+punteggi_xgb_test=normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"],t_test_xgb)
+print("Media utilità clinica XGBoost Test set:", punteggi_xgb_test)
 
 print("\nMLP Test Set:")
 evaluetion_metrics(Y_test,t_test_mlp)
-punteggi_mlp_test=[calcola_punteggio(ore,pred) for ore,pred in zip(test_set["hours_to_sepsis"],t_test_mlp)]
-print("Media utilità clinica MLP Test set:", sum(punteggi_mlp_test) / len(punteggi_mlp_test))
+punteggi_mlp_test=normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"],t_test_mlp)
+print("Media utilità clinica MLP Test set:", punteggi_mlp_test)
 
 print("\nLSTM Test Set: ")
 evaluetion_metrics(Y_test_seq, t_test_lstm)
 hours_test = test_set.groupby("subject_id")["hours_to_sepsis"].last()
-punteggi_lstm_test = [calcola_punteggio(ore, pred) for ore, pred in zip(hours_test, t_test_lstm)]
-print("Media utilità clinica LSTM Test set:", sum(punteggi_lstm_test) / len(punteggi_lstm_test))
+is_sepsis_test = test_set.groupby("subject_id")["is_sepsis"].last()
+punteggi_lstm_test = normalizza_punteggio(hours_test,is_sepsis_test,t_test_lstm)
+print("Media utilità clinica LSTM Test set:", punteggi_lstm_test)
