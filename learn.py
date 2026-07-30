@@ -197,7 +197,7 @@ split = [(list(range(n_train)), list(range(n_train, n_train + n_val)))]
 #Provo tutte le combinazioni della griglia e valuto sul validation set con AUROC,l'early stopping ferma il training se la performance non migliora per 10 round consecutivi
 grid_xgb = GridSearchCV(
     XGBClassifier(early_stopping_rounds=10, eval_metric="auc",
-                  learning_rate=0.1, max_depth=7, n_estimators=100), 
+                  learning_rate=0.1, max_depth=7, n_estimators=100,verbosity=0), 
     param_grid_xgb, cv=split, scoring="roc_auc", n_jobs=-1
 )
 grid_xgb.fit(X_train_val, Y_train_val, eval_set=[(X_val, Y_val)])
