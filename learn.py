@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import warnings
+import random
 warnings.filterwarnings("ignore")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 from sklearn.metrics import roc_auc_score,average_precision_score, accuracy_score, f1_score
@@ -10,7 +11,6 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.layers import LSTM
 from sklearn.preprocessing import StandardScaler
-from sklearn.impute import SimpleImputer
 from sklearn.model_selection import GridSearchCV
 from scikeras.wrappers import KerasClassifier
 from tensorflow.keras.callbacks import EarlyStopping
@@ -59,6 +59,8 @@ def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
         else:
             return 0
     else:
+        if pd.isna(hours_to_sepsis):
+            return 0  # settico ma senza hours_to_sepsis valido
         if hours_to_sepsis> 12:
             if prediction == 1:
                 return -0.05
@@ -111,38 +113,10 @@ file["sepsis_onset_hour"] = (file["sepsis_onset"] - file["intime"]).dt.total_sec
 #Calcolo quante ore mancano alla sepsi per ogni riga (negativo = sepsi già avvenuta)
 file["hours_to_sepsis"] = file["sepsis_onset_hour"] - file["hour_index"]
 
-#Ordino i pazienti cronologicamente per data di ammissione in ICU (intime),così i ricoveri più vecchi vanno nel training e i più recenti nel test
-pazienti_intime = file.groupby("subject_id")["intime"].first()
-pazienti_intime = pazienti_intime.sort_values()
-pazienti = pazienti_intime.index
-paziente_is_sepsis = file.groupby("subject_id")["is_sepsis"].first()
-settici = pazienti_intime[paziente_is_sepsis == True]
-non_settici = pazienti_intime[paziente_is_sepsis == False]
-
-#Faccio lo split, al training assegno il 60%, al validation 20% e al test 20% separando settici e non settici per mantenere la proporzione in ogni set 
-#prendo il numero totale dei pazienti e calcolo i tagli da fare 
-x_settici = int(len(settici)*0.60)  # divido settici e non settici separatamente per evitare che finiscano tutti 
-y_settici = int(len(settici)*0.80)  # in un solo set, senza questa separazione val e test avevano solo label 0
-                                    # e le metriche (AUROC, AUPRC, F1) non mi venivano calcolate
-
-
-#Sto prendendo gli ID dei pazienti settici da mettere in lista
-train_settici = settici[:x_settici].index
-val_settici = settici[x_settici:y_settici].index
-test_settici = settici[y_settici:].index
-
-x_non_settici = int(len(non_settici) * 0.60)
-y_non_settici = int(len(non_settici) * 0.80)
-
-#Sto prendendo gli ID dei pazienti NON settici da mettere in lista
-train_non_settici = non_settici[:x_non_settici].index
-val_non_settici = non_settici[x_non_settici:y_non_settici].index
-test_non_settici = non_settici[y_non_settici:].index
-
-#Unisco settici e non settici
-train_ids = train_settici.union(train_non_settici)
-val_ids = val_settici.union(val_non_settici)
-test_ids = test_settici.union(test_non_settici)
+# split temporale basato su anchor_year_group — training sui ricoveri più vecchi, test sui più recenti
+train_ids = file[file["anchor_year_group"].isin(["2008 - 2010", "2011 - 2013"])]["subject_id"].unique()
+val_ids = file[file["anchor_year_group"] == "2014 - 2016"]["subject_id"].unique()
+test_ids = file[file["anchor_year_group"] == "2017 - 2019"]["subject_id"].unique()
 
 #Prendo le righe dei pazienti che appartengono al corrispettivo gruppo 
 test_set=file[file["subject_id"].isin(test_ids)]
@@ -150,13 +124,13 @@ validation_set=file[file["subject_id"].isin(val_ids)]
 train_set=file[file["subject_id"].isin(train_ids)]
 
 #Tolgo le colonne identificative e la label dalla X, la Y contiene solo la label, servirà per confrontare le predizioni del modello con la realtà
-X_train=train_set.drop(["subject_id","hadm_id","stay_id","label_sepsis_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI"],axis=1)
+X_train=train_set.drop(["subject_id","hadm_id","stay_id","label_sepsis_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group"],axis=1)
 Y_train=train_set["label_sepsis_6h"]
 
-X_val=validation_set.drop(["subject_id","hadm_id","stay_id","label_sepsis_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI"],axis=1)
+X_val=validation_set.drop(["subject_id","hadm_id","stay_id","label_sepsis_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group"],axis=1)
 Y_val=validation_set["label_sepsis_6h"]
 
-X_test=test_set.drop(["subject_id","hadm_id","stay_id","label_sepsis_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI"],axis=1)
+X_test=test_set.drop(["subject_id","hadm_id","stay_id","label_sepsis_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group"],axis=1)
 Y_test=test_set["label_sepsis_6h"]
 
 #Prendo i nomi delle colonne che usero come feature 
@@ -197,59 +171,64 @@ split = [(list(range(n_train)), list(range(n_train, n_train + n_val)))]
 #Provo tutte le combinazioni della griglia e valuto sul validation set con AUROC,l'early stopping ferma il training se la performance non migliora per 10 round consecutivi
 grid_xgb = GridSearchCV(
     XGBClassifier(early_stopping_rounds=10, eval_metric="auc",
-                  learning_rate=0.1, max_depth=7, n_estimators=100,verbosity=0), 
-    param_grid_xgb, cv=split, scoring="roc_auc", n_jobs=-1
+                  learning_rate=0.1, max_depth=7, n_estimators=100),
+    param_grid_xgb, cv=split, scoring="roc_auc", n_jobs=1
 )
 grid_xgb.fit(X_train_val, Y_train_val, eval_set=[(X_val, Y_val)])
 
 #Prendo il modello con i migliori parametri trovati
 model = grid_xgb.best_estimator_
-t = model.predict(X_val)
+pred_xgb = model.predict(X_val)
 t_test_xgb = model.predict(X_test)
 print("Migliori parametri XGBoost:", grid_xgb.best_params_)
 
 #Preparo la MLP,ovvero preparo i vari layer e normalizzo 
 scaler = StandardScaler()
-imputer = SimpleImputer(strategy="mean")
 
-#Train set
-X_train_clean = X_train.replace(-1, np.nan)
-X_train_imputed = imputer.fit_transform(X_train_clean)
-X_train_scaled = scaler.fit_transform(X_train_imputed)#devo normalizzare i valori per evitare che dominino
+#Gestisco i -1 e i NaN
+X_train_scaled = X_train.replace(-1, np.nan).ffill().fillna(0)
+X_val_scaled = X_val.replace(-1, np.nan).ffill().fillna(0)
+X_test_scaled = X_test.replace(-1, np.nan).ffill().fillna(0)
 
-#Validation set
-X_val_clean = X_val.replace(-1, np.nan)
-X_val_imputed = imputer.transform(X_val_clean)
-X_val_scaled = scaler.transform(X_val_imputed)#devo normalizzare i valori per evitare che dominino
+#Normalizzo MLP
+X_train_scaled = scaler.fit_transform(X_train_scaled)
+X_val_scaled = scaler.transform(X_val_scaled)
+X_test_scaled = scaler.transform(X_test_scaled)
 
-#Test set
-X_test_clean = X_test.replace(-1, np.nan)
-X_test_imputed = imputer.transform(X_test_clean)
-X_test_scaled = scaler.transform(X_test_imputed)
+#normalizzazione LSTM con lo stesso scaler
+n, t, f = X_train_seq.shape
+X_train_seq = scaler.transform(X_train_seq.reshape(-1, f)).reshape(n, t, f)
+
+n, t, f = X_val_seq.shape
+X_val_seq = scaler.transform(X_val_seq.reshape(-1, f)).reshape(n, t, f)
+
+n, t, f = X_test_seq.shape
+X_test_seq = scaler.transform(X_test_seq.reshape(-1, f)).reshape(n, t, f)
 
 #Tuning manuale MLP (perchè mi dava problemi)
 best_auroc_mlp = 0
 best_params_mlp = {}
 mlp = None
-for units in [64]:
-    for epochs in [10]:
-        for batch_size in [128]:
-            mlp_temp = Sequential()
-            mlp_temp.add(Dense(units=units, activation="relu", input_dim=X_train_scaled.shape[1]))
-            mlp_temp.add(Dense(units=32, activation="relu"))
-            mlp_temp.add(Dense(units=1, activation="sigmoid"))
-            mlp_temp.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-            early_stop = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True) #early stopping ferma il training se la val_loss non migliora per 3 epoch consecutive e ripristina i pesi migliori trovati durante il training
-            mlp_temp.fit(X_train_scaled, Y_train, epochs=epochs, batch_size=batch_size, verbose=0,
-            validation_data=(X_val_scaled, Y_val), callbacks=[early_stop])
+random.seed(42)
+combinazioni_mlp = [(u, e, b) for u in [64, 128, 256] for e in [10, 30, 50] for b in [128, 256]]
+combinazioni_scelte_mlp = random.sample(combinazioni_mlp, 6)
+for units, epochs, batch_size in combinazioni_scelte_mlp:
+    mlp_temp = Sequential()
+    mlp_temp.add(Dense(units=units, activation="relu", input_dim=X_train_scaled.shape[1]))
+    mlp_temp.add(Dense(units=32, activation="relu"))
+    mlp_temp.add(Dense(units=1, activation="sigmoid"))
+    mlp_temp.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+    early_stop = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True) #early stopping ferma il training se la val_loss non migliora per 3 epoch consecutive e ripristina i pesi migliori trovati durante il training
+    mlp_temp.fit(X_train_scaled, Y_train, epochs=epochs, batch_size=batch_size, verbose=0,
+    validation_data=(X_val_scaled, Y_val), callbacks=[early_stop])
             
-            prob = mlp_temp.predict(X_val_scaled).flatten()
-            auroc = roc_auc_score(Y_val, prob)
-            
-            if auroc > best_auroc_mlp:
-                best_auroc_mlp = auroc
-                best_params_mlp = {"units": units, "epochs": epochs, "batch_size": batch_size}
-                mlp = mlp_temp
+    prob = mlp_temp.predict(X_val_scaled).flatten()
+    auroc = roc_auc_score(Y_val, prob)
+           
+    if auroc > best_auroc_mlp:
+        best_auroc_mlp = auroc
+        best_params_mlp = {"units": units, "epochs": epochs, "batch_size": batch_size}
+        mlp = mlp_temp
 if mlp is None:
     print("Errore: nessun modello LSTM trovato")
 else:
@@ -263,24 +242,25 @@ else:
 best_auroc_lstm = 0
 best_params_lstm = {}
 lstm = None
-for units in [128]:
-    for epochs in [10]:
-        for batch_size in [128]:
-            lstm_temp = Sequential()
-            lstm_temp.add(LSTM(units=units, input_shape=(12, len(feature_cols))))
-            lstm_temp.add(Dense(units=1, activation="sigmoid"))
-            lstm_temp.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
-            early_stop = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True) #early stopping ferma il training se la val_loss non migliora per 3 epoch consecutive e ripristina i pesi migliori trovati durante il training
-            lstm_temp.fit(X_train_seq, Y_train_seq, epochs=epochs, batch_size=batch_size, verbose=0,
-            validation_data=(X_val_seq, Y_val_seq), callbacks=[early_stop])
+combinazioni_lstm = [(u, e, b) for u in [64, 128] for e in [10, 30, 50] for b in [128, 256]]
+combinazioni_scelte_lstm = random.sample(combinazioni_lstm, 6)
+
+for units, epochs, batch_size in combinazioni_scelte_lstm:
+    lstm_temp = Sequential()
+    lstm_temp.add(LSTM(units=units, input_shape=(12, len(feature_cols))))
+    lstm_temp.add(Dense(units=1, activation="sigmoid"))
+    lstm_temp.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+    early_stop = EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True) #early stopping ferma il training se la val_loss non migliora per 3 epoch consecutive e ripristina i pesi migliori trovati durante il training
+    lstm_temp.fit(X_train_seq, Y_train_seq, epochs=epochs, batch_size=batch_size, verbose=0,
+    validation_data=(X_val_seq, Y_val_seq), callbacks=[early_stop])
             
-            prob = lstm_temp.predict(X_val_seq).flatten()
-            auroc = roc_auc_score(Y_val_seq, prob)
+    prob = lstm_temp.predict(X_val_seq).flatten()
+    auroc = roc_auc_score(Y_val_seq, prob)
             
-            if auroc > best_auroc_lstm:
-                best_auroc_lstm = auroc
-                best_params_lstm = {"units": units, "epochs": epochs, "batch_size": batch_size}
-                lstm = lstm_temp
+    if auroc > best_auroc_lstm:
+        best_auroc_lstm = auroc
+        best_params_lstm = {"units": units, "epochs": epochs, "batch_size": batch_size}
+        lstm = lstm_temp
 if lstm is None:
     print("Errore: nessun modello LSTM trovato")
 else:
@@ -293,9 +273,14 @@ print("\n ---------- Validation Set ----------")
 print("\nXGBOOST: ")
 #Calcolo la probabilità per AUROC e AUPRC
 t_xgb_prob = model.predict_proba(X_val)[:, 1]
-evaluetion_metrics(Y_val,t,t_xgb_prob)
+evaluetion_metrics(Y_val,pred_xgb,t_xgb_prob)
+print(len(validation_set["hours_to_sepsis"]))
+print(len(pred_xgb))
+print(len(t_mlp))
+print(len(Y_val_seq))
+print(len(t_lstm))
 #Calcolo l'utilità clinica normalizzata, passo le ore mancanti alla sepsi, se il paziente è settico e le predizioni del modello t sono le predizioni di XGBoost
-punteggi_xgb = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], t)
+punteggi_xgb = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], pred_xgb)
 print("Utilità clinica normalizzata XGBoost:", punteggi_xgb)
 
 print("\nMLP: ")

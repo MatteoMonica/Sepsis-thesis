@@ -229,7 +229,11 @@ def carica_pazienti():
     print(f"Stay totali nella coorte finale: {len(pazienti)}")
     print(f"  Stay con sepsi: {int(pazienti['is_sepsis'].sum())}")
     print(f"  Stay senza sepsi: {int((~pazienti['is_sepsis']).sum())}")
-
+    # aggiungo anchor_year_group da patients.csv.gz per il temporal split
+    patients_info = pd.read_csv(
+    f"{DATA_DIR}/patients.csv.gz",
+    usecols=["subject_id", "anchor_year_group"] )
+    pazienti = pazienti.merge(patients_info, on="subject_id", how="left")
     return pazienti
 
 
@@ -248,7 +252,7 @@ def load_eligible_stays(pazienti):
 
     patients = pd.read_csv(
         f"{DATA_DIR}/patients.csv.gz",
-        usecols=["subject_id", "gender", "anchor_age", "anchor_year"],
+        usecols=["subject_id", "gender", "anchor_age", "anchor_year", "anchor_year_group"],
     )
 
     # conto quanti ricoveri distinti ha ogni paziente: mi serve per tenere solo chi ne ha esattamente uno
@@ -472,9 +476,16 @@ def assemble_final_table(hourly_grid, chart_hourly, lab_hourly, pazienti):
 
     # riattacco le info della coorte (onset, is_sepsis, tempi clinici...) a livello di stay
     pazienti_info = pazienti.drop_duplicates(subset=["subject_id", "hadm_id", "stay_id"]).copy()
+    
     final_table = final_table.merge(
         pazienti_info, on=["subject_id", "hadm_id", "stay_id"], how="left"
     )
+    if "Age_x" in final_table.columns:
+        final_table["Age"] = final_table["Age_x"].fillna(final_table["Age_y"])
+        final_table = final_table.drop(columns=["Age_x", "Age_y"])
+    if "Gender_x" in final_table.columns:
+        final_table["Gender"] = final_table["Gender_x"].fillna(final_table["Gender_y"])
+        final_table = final_table.drop(columns=["Gender_x", "Gender_y"])
 
     # mi assicuro che tutte le colonne numeriche esistano (se una variabile non è mai comparsa la creo vuota)
     # e le forzo a numerico arrotondando a 2 decimali, così il CSV resta pulito
@@ -598,6 +609,58 @@ def main():
     # aggrego vitali e lab, assemblo tutto, metto la label, riordino le colonne e imputo i mancanti
     pazienti = carica_pazienti()
     eligible_stays = load_eligible_stays(pazienti)
+    settici_ids = pazienti[pazienti["is_sepsis"]==True]["stay_id"]
+    settici_eligibili = eligible_stays[eligible_stays["stay_id"].isin(settici_ids)]
+    controlli_eligibili = eligible_stays[~eligible_stays["stay_id"].isin(settici_ids)]
+
+    n_settici = len(settici_eligibili)
+    controlli_campionati = controlli_eligibili.sample(
+    n=min(n_settici * 2, len(controlli_eligibili)), random_state=42)
+    eligible_stays = pd.concat([settici_eligibili, controlli_campionati])
+    print(f"Settici eleggibili: {n_settici}")
+    print(f"Controlli campionati: {len(controlli_campionati)}")
+    # se i controlli non bastano per il rapporto 1:2, prendo altri dal MIMIC
+    if len(controlli_campionati) < n_settici * 2:
+        mancanti = n_settici * 2 - len(controlli_campionati)
+        print(f"Mancano {mancanti} controlli, li prendo da icustays")
+        
+        # carico tutti gli stay ICU
+        icu_extra = pd.read_csv(f"{DATA_DIR}/icustays.csv.gz",usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime"])
+        
+        # escludo i pazienti già nella coorte
+        stay_gia_presenti = set(eligible_stays["stay_id"])
+        icu_extra = icu_extra[~icu_extra["stay_id"].isin(stay_gia_presenti)]
+        
+        print(f"Stay extra disponibili: {len(icu_extra)}")
+        
+        # applico filtri
+        icu_extra["intime"] = pd.to_datetime(icu_extra["intime"], errors="coerce")
+        icu_extra["outtime"] = pd.to_datetime(icu_extra["outtime"], errors="coerce")
+        icu_extra["icu_hours"] = (icu_extra["outtime"] - icu_extra["intime"]).dt.total_seconds() / 3600
+        icu_extra = icu_extra[icu_extra["icu_hours"] >= 24].copy()
+        icu_extra["n_hours"] = icu_extra["icu_hours"].astype(int)
+        icu_extra = icu_extra.rename(columns={"intime": "icu_intime", "outtime": "icu_outtime"})
+        
+        # campiono solo i mancanti
+        icu_extra = icu_extra.sample(n=min(mancanti, len(icu_extra)), random_state=42)
+        
+        # aggiungo colonne mancanti
+        icu_extra["is_sepsis"] = False
+        icu_extra["sepsis_onset_time"] = pd.NaT
+        # aggiungo anchor_year_group e dati demografici ai controlli extra
+        patients_info = pd.read_csv(f"{DATA_DIR}/patients.csv.gz",usecols=["subject_id", "anchor_age", "anchor_year", "anchor_year_group", "gender"])
+        icu_extra = icu_extra.merge(patients_info, on="subject_id", how="left")
+        icu_extra["Age"] = icu_extra["anchor_age"]
+        icu_extra["Gender"] = icu_extra["gender"]
+        # aggiungo i controlli extra anche a pazienti per il merge in assemble_final_table
+        pazienti = pd.concat([pazienti, icu_extra[["subject_id", "hadm_id", "stay_id", "is_sepsis", "sepsis_onset_time",
+                                                    "anchor_year_group", "Age", "Gender",
+                                                    "anchor_age", "anchor_year"]]], ignore_index=True)
+                
+        # aggiungo alla coorte
+        eligible_stays = pd.concat([eligible_stays, icu_extra], ignore_index=True)
+        print(f"Stay totali dopo aggiunta extra: {len(eligible_stays)}")
+        print("Colonne eligible_stays:", eligible_stays.columns.tolist())
     hourly_grid = build_hourly_grid(eligible_stays)
     chart_hourly = aggregate_chart_events(eligible_stays, hourly_grid)
     lab_hourly = aggregate_lab_events(eligible_stays, hourly_grid)
