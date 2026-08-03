@@ -216,6 +216,7 @@ def carica_pazienti():
 
     # unisco settici + controlli in un'unica coorte
     pazienti = pd.concat([sepsis_base, control_base], ignore_index=True)
+    pazienti = pazienti.drop_duplicates(subset=["subject_id", "hadm_id", "stay_id"])
     # se per caso uno stay è duplicato, ordino mettendo i settici davanti e tengo solo la prima riga:
     # in pratica in caso di conflitto vince sempre l'etichetta "sepsi"
     pazienti = (
@@ -656,6 +657,7 @@ def main():
         pazienti = pd.concat([pazienti, icu_extra[["subject_id", "hadm_id", "stay_id", "is_sepsis", "sepsis_onset_time",
                                                     "anchor_year_group", "Age", "Gender",
                                                     "anchor_age", "anchor_year"]]], ignore_index=True)
+        pazienti = pazienti.drop_duplicates(subset=["subject_id", "hadm_id", "stay_id"])
                 
         # aggiungo alla coorte
         eligible_stays = pd.concat([eligible_stays, icu_extra], ignore_index=True)

@@ -230,7 +230,7 @@ for units, epochs, batch_size in combinazioni_scelte_mlp:
         best_params_mlp = {"units": units, "epochs": epochs, "batch_size": batch_size}
         mlp = mlp_temp
 if mlp is None:
-    print("Errore: nessun modello LSTM trovato")
+    print("Errore: nessun modello MLP trovato")
 else:
     t_mlp = (mlp.predict(X_val_scaled) > 0.5).astype(int)
     t_test_mlp = (mlp.predict(X_test_scaled) > 0.5).astype(int)
@@ -274,11 +274,6 @@ print("\nXGBOOST: ")
 #Calcolo la probabilità per AUROC e AUPRC
 t_xgb_prob = model.predict_proba(X_val)[:, 1]
 evaluetion_metrics(Y_val,pred_xgb,t_xgb_prob)
-print(len(validation_set["hours_to_sepsis"]))
-print(len(pred_xgb))
-print(len(t_mlp))
-print(len(Y_val_seq))
-print(len(t_lstm))
 #Calcolo l'utilità clinica normalizzata, passo le ore mancanti alla sepsi, se il paziente è settico e le predizioni del modello t sono le predizioni di XGBoost
 punteggi_xgb = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], pred_xgb)
 print("Utilità clinica normalizzata XGBoost:", punteggi_xgb)
