@@ -615,54 +615,78 @@ def main():
     controlli_eligibili = eligible_stays[~eligible_stays["stay_id"].isin(settici_ids)]
 
     n_settici = len(settici_eligibili)
-    controlli_campionati = controlli_eligibili.sample(
-    n=min(n_settici * 2, len(controlli_eligibili)), random_state=42)
-    eligible_stays = pd.concat([settici_eligibili, controlli_campionati])
+
+    # per il fallback mi servono gli stessi identici filtri di load_eligible_stays:
+    # Age >= 18 e n_hadm == 1 (icu_hours >= 24 lo applico dopo, riga per riga)
+    admissions = pd.read_csv(f"{DATA_DIR}/admissions.csv.gz", usecols=["subject_id", "hadm_id"])
+    admission_counts = admissions.groupby("subject_id")["hadm_id"].nunique().reset_index(name="n_hadm")
+    patients_info_full = pd.read_csv(
+        f"{DATA_DIR}/patients.csv.gz",
+        usecols=["subject_id", "gender", "anchor_age", "anchor_year", "anchor_year_group"],
+    )
+
+    controlli_campionati_lista = []
+    icu_extra_lista = []
+    stay_gia_presenti = set(settici_eligibili["stay_id"]) | set(controlli_eligibili["stay_id"])
+
+    for anno, settici_anno in settici_eligibili.groupby("anchor_year_group"):
+        n_settici_anno = len(settici_anno)
+        controlli_anno = controlli_eligibili[controlli_eligibili["anchor_year_group"] == anno]
+        n_da_campionare = min(n_settici_anno * 2, len(controlli_anno))
+        controlli_campionati_anno = controlli_anno.sample(n=n_da_campionare, random_state=42)
+        controlli_campionati_lista.append(controlli_campionati_anno)
+
+        mancanti_anno = n_settici_anno * 2 - n_da_campionare
+        print(f"  Anno {anno}: {n_settici_anno} settici, {n_da_campionare} controlli campionati (su {len(controlli_anno)} disponibili), mancano {mancanti_anno}")
+
+        if mancanti_anno > 0:
+            # pesco controlli extra SOLO da questo stesso anno, con gli stessi filtri clinici della coorte principale
+            icu_extra_anno = pd.read_csv(
+                f"{DATA_DIR}/icustays.csv.gz",
+                usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime"],
+            )
+            icu_extra_anno = icu_extra_anno[~icu_extra_anno["stay_id"].isin(stay_gia_presenti)]
+            icu_extra_anno["intime"] = pd.to_datetime(icu_extra_anno["intime"], errors="coerce")
+            icu_extra_anno["outtime"] = pd.to_datetime(icu_extra_anno["outtime"], errors="coerce")
+            icu_extra_anno["icu_hours"] = (icu_extra_anno["outtime"] - icu_extra_anno["intime"]).dt.total_seconds() / 3600
+            icu_extra_anno = icu_extra_anno.rename(columns={"intime": "icu_intime", "outtime": "icu_outtime"})
+
+            icu_extra_anno = icu_extra_anno.merge(patients_info_full, on="subject_id", how="left")
+            icu_extra_anno = icu_extra_anno.merge(admission_counts, on="subject_id", how="left")
+            icu_extra_anno["Age"] = icu_extra_anno["anchor_age"] + (icu_extra_anno["icu_intime"].dt.year - icu_extra_anno["anchor_year"])
+
+            icu_extra_anno = icu_extra_anno[
+                (icu_extra_anno["anchor_year_group"] == anno)
+                & (icu_extra_anno["icu_hours"] >= 24)
+                & (icu_extra_anno["Age"] >= 18)
+                & (icu_extra_anno["n_hadm"] == 1)
+            ].copy()
+
+            n_trovati = min(mancanti_anno, len(icu_extra_anno))
+            icu_extra_anno = icu_extra_anno.sample(n=n_trovati, random_state=42)
+            icu_extra_anno["n_hours"] = icu_extra_anno["icu_hours"].astype(int)
+            icu_extra_anno["Gender"] = icu_extra_anno["gender"]
+            icu_extra_anno["is_sepsis"] = False
+            icu_extra_anno["sepsis_onset_time"] = pd.NaT
+
+            print(f"    -> trovati {n_trovati} controlli extra da icustays per l'anno {anno}")
+
+            stay_gia_presenti |= set(icu_extra_anno["stay_id"])
+            icu_extra_lista.append(icu_extra_anno)
+
+            pazienti = pd.concat([pazienti, icu_extra_anno[["subject_id", "hadm_id", "stay_id", "is_sepsis", "sepsis_onset_time",
+                                                              "anchor_year_group", "Age", "Gender",
+                                                              "anchor_age", "anchor_year"]]], ignore_index=True)
+
+    pazienti = pazienti.drop_duplicates(subset=["subject_id", "hadm_id", "stay_id"])
+    controlli_campionati = pd.concat(controlli_campionati_lista, ignore_index=True)
+    icu_extra_totale = pd.concat(icu_extra_lista, ignore_index=True) if icu_extra_lista else pd.DataFrame()
+
+    eligible_stays = pd.concat([settici_eligibili, controlli_campionati, icu_extra_totale], ignore_index=True)
     print(f"Settici eleggibili: {n_settici}")
-    print(f"Controlli campionati: {len(controlli_campionati)}")
-    # se i controlli non bastano per il rapporto 1:2, prendo altri dal MIMIC
-    if len(controlli_campionati) < n_settici * 2:
-        mancanti = n_settici * 2 - len(controlli_campionati)
-        print(f"Mancano {mancanti} controlli, li prendo da icustays")
-        
-        # carico tutti gli stay ICU
-        icu_extra = pd.read_csv(f"{DATA_DIR}/icustays.csv.gz",usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime"])
-        
-        # escludo i pazienti già nella coorte
-        stay_gia_presenti = set(eligible_stays["stay_id"])
-        icu_extra = icu_extra[~icu_extra["stay_id"].isin(stay_gia_presenti)]
-        
-        print(f"Stay extra disponibili: {len(icu_extra)}")
-        
-        # applico filtri
-        icu_extra["intime"] = pd.to_datetime(icu_extra["intime"], errors="coerce")
-        icu_extra["outtime"] = pd.to_datetime(icu_extra["outtime"], errors="coerce")
-        icu_extra["icu_hours"] = (icu_extra["outtime"] - icu_extra["intime"]).dt.total_seconds() / 3600
-        icu_extra = icu_extra[icu_extra["icu_hours"] >= 24].copy()
-        icu_extra["n_hours"] = icu_extra["icu_hours"].astype(int)
-        icu_extra = icu_extra.rename(columns={"intime": "icu_intime", "outtime": "icu_outtime"})
-        
-        # campiono solo i mancanti
-        icu_extra = icu_extra.sample(n=min(mancanti, len(icu_extra)), random_state=42)
-        
-        # aggiungo colonne mancanti
-        icu_extra["is_sepsis"] = False
-        icu_extra["sepsis_onset_time"] = pd.NaT
-        # aggiungo anchor_year_group e dati demografici ai controlli extra
-        patients_info = pd.read_csv(f"{DATA_DIR}/patients.csv.gz",usecols=["subject_id", "anchor_age", "anchor_year", "anchor_year_group", "gender"])
-        icu_extra = icu_extra.merge(patients_info, on="subject_id", how="left")
-        icu_extra["Age"] = icu_extra["anchor_age"]
-        icu_extra["Gender"] = icu_extra["gender"]
-        # aggiungo i controlli extra anche a pazienti per il merge in assemble_final_table
-        pazienti = pd.concat([pazienti, icu_extra[["subject_id", "hadm_id", "stay_id", "is_sepsis", "sepsis_onset_time",
-                                                    "anchor_year_group", "Age", "Gender",
-                                                    "anchor_age", "anchor_year"]]], ignore_index=True)
-        pazienti = pazienti.drop_duplicates(subset=["subject_id", "hadm_id", "stay_id"])
-                
-        # aggiungo alla coorte
-        eligible_stays = pd.concat([eligible_stays, icu_extra], ignore_index=True)
-        print(f"Stay totali dopo aggiunta extra: {len(eligible_stays)}")
-        print("Colonne eligible_stays:", eligible_stays.columns.tolist())
+    print(f"Controlli campionati (stratificati): {len(controlli_campionati)}")
+    print(f"Controlli extra da icustays (stratificati): {len(icu_extra_totale)}")
+    print(f"Stay totali dopo aggiunta extra: {len(eligible_stays)}")
     hourly_grid = build_hourly_grid(eligible_stays)
     chart_hourly = aggregate_chart_events(eligible_stays, hourly_grid)
     lab_hourly = aggregate_lab_events(eligible_stays, hourly_grid)
