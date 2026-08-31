@@ -515,6 +515,26 @@ def add_sepsis_label(final_table):
         >= (final_table["sepsis_onset_time"] - pd.Timedelta(hours=6))
     ).astype(int)
 
+    # converto anche i due tempi che mi servono per le label dei sotto-task del multitask
+    final_table["suspected_infection_time"] = pd.to_datetime(
+        final_table["suspected_infection_time"], errors="coerce"
+    )
+    final_table["sofa_time"] = pd.to_datetime(
+        final_table["sofa_time"], errors="coerce"
+    )
+
+    # label infezione: stessa identica logica di sepsis_6h, ma con suspected_infection_time
+    final_table["label_infection_6h"] = (
+        final_table["hour_end"]
+        >= (final_table["suspected_infection_time"] - pd.Timedelta(hours=6))
+    ).astype(int)
+
+    # label disfunzione d'organo: stessa logica, ma con sofa_time
+    final_table["label_organ_6h"] = (
+        final_table["hour_end"]
+        >= (final_table["sofa_time"] - pd.Timedelta(hours=6))
+    ).astype(int)
+
     # qualche statistica per controllare il bilanciamento della label (di solito è molto sbilanciata)
     positive_rows = final_table["label_sepsis_6h"].sum()
     total_rows = len(final_table)
@@ -562,9 +582,10 @@ def reorder_columns(final_table, pazienti):
         if column not in ordered_columns:
             ordered_columns.append(column)
 
-    # e per ultima la label
-    if "label_sepsis_6h" not in ordered_columns:
-        ordered_columns.append("label_sepsis_6h")
+    # e per ultime le tre label (sepsi + i due sotto-task del multitask)
+    for label_column in ["label_sepsis_6h", "label_infection_6h", "label_organ_6h"]:
+        if label_column not in ordered_columns:
+            ordered_columns.append(label_column)
 
     # tengo solo le colonne che esistono davvero ed elimino l'onset dal dataframe finale
     ordered_columns = [column for column in ordered_columns if column in final_table.columns]
