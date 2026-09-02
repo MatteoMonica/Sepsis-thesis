@@ -11,6 +11,43 @@ torch.manual_seed(42)  # stessa pratica di riproducibilità usata per MLP/LSTM
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+#Sto calcolando i punteggi da dare come nel paper (PhysioNet)
+def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
+    if is_sepsis == False:
+        if prediction == 1:
+            return -0.05
+        else:
+            return 0
+    else:
+        if pd.isna(hours_to_sepsis):
+            return 0
+        if hours_to_sepsis> 12:
+            if prediction == 1:
+                return -0.05
+            else:
+                return 0
+        elif hours_to_sepsis >= 6 and hours_to_sepsis <= 12: 
+            if prediction == 1:
+                return (12-hours_to_sepsis)/6
+            else:
+                return 0      
+        elif hours_to_sepsis>=-3 and hours_to_sepsis <6:
+            if prediction == 1:
+                return  (hours_to_sepsis+3) / 9
+            else:
+                return -2 *(6-hours_to_sepsis)/9
+        elif hours_to_sepsis < -3:
+            if prediction == 1:
+                return 0
+            else:
+                return -2    
+
+def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
+   U_totale = sum([calcola_punteggio(ore, pred, sepsi) for ore, pred, sepsi in zip(hours_to_sepsis_list, prediction, is_sepsis_list)])
+   U_no_predictions=sum([calcola_punteggio(ore, 0, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
+   U_optimal=sum([calcola_punteggio(ore,1,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
+   return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
+
 # Leggo il CSV e ricostruisco le colonne temporali
 file = pd.read_csv("sepsis3_hourly_labeled.csv")
 file["sofa_time"] = pd.to_datetime(file["sofa_time"], errors="coerce")
@@ -69,12 +106,10 @@ X_val_scaled = scaler.transform(X_val_ffill)
 X_test_scaled = scaler.transform(X_test_ffill)
 
 # Converto tutto in tensori PyTorch 
-# le feature sono già numpy array (output di StandardScaler), le converto direttamente
 X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
 X_val_tensor = torch.tensor(X_val_scaled, dtype=torch.float32)
 X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
 
-# le label le rendo colonna (N,1) con .view(-1,1), per combaciare con l'output del modello
 Y_train_sepsi_tensor = torch.tensor(Y_train_sepsi.values, dtype=torch.float32).view(-1, 1)
 Y_train_inf_tensor = torch.tensor(Y_train_inf.values, dtype=torch.float32).view(-1, 1)
 Y_train_org_tensor = torch.tensor(Y_train_org.values, dtype=torch.float32).view(-1, 1)
@@ -94,65 +129,36 @@ print("Shape Y_train_sepsi_tensor:", Y_train_sepsi_tensor.shape)
 class SepsisMultitaskParallelo(nn.Module):
     def __init__(self, n_features, dim_z=64):
         super().__init__()
-        
-        # Prende in input i dati clinici orari del paziente (es. HR, Temp, Lactate) 
-        # e li comprime in un vettore "riassuntivo" z (dim_z) che ne racchiude le informazioni utili.
         self.encoder = nn.Sequential(
-            # Primo strato: combinazione pesata + bias (n_features -> 128)
-            nn.Linear(n_features, 128), 
-            nn.ReLU(),                  # Attivazione: azzera i negativi per introdurre non-linearità
-            
-            # Secondo strato: mappa le feature estratte nello spazio latente z (128 -> dim_z)
-            nn.Linear(128, dim_z),      
+            nn.Linear(n_features, 128),
+            nn.ReLU(),
+            nn.Linear(128, dim_z),
             nn.ReLU(),
         )
-        
-        # Riduce il vettore delle feature (dim_z) a un singolo valore lineare per il calcolo della probabilità
         self.infezione = nn.Linear(dim_z, 1)
-        
-        # Ramo parallelo per l'organo: mappa lo stesso vettore z a un singolo valore d'uscita
         self.organo = nn.Linear(dim_z, 1)
-        
-        # sepsis_head: prende z + P_infezione + P_organo + (P_infezione * P_organo)
-        # quindi il suo input ha dimensione dim_z + 3
-        self.sepsis_head = nn.Linear(dim_z + 3, 1)
+        self.sepsis_head = nn.Linear(dim_z, 1)
 
     def forward(self, x):
-        # Passa i dati grezzi del paziente attraverso la rete iniziale per estrarre le feature utili z
-        # x ha forma (pazienti, parametri_clinici) -> z diventa (pazienti, 64)
-        z = self.encoder(x) 
-        
-        # Calcola i punteggi grezzi (logit) per le due sotto-attività indipendenti
-        # Esce un numero reale per ogni paziente (positivo o negativo)
+        z = self.encoder(x)
         logit_inf = self.infezione(z)
         logit_org = self.organo(z)
-        
-        # Trasforma i logit grezzi in probabilità reali comprese tra 0 e 1 usando la Sigmoide
+        logit_sepsis = self.sepsis_head(z)
+
         p_inf = torch.sigmoid(logit_inf)
         p_org = torch.sigmoid(logit_org)
-        
-        # Costruisco l'input per la sepsis_head: prepara tutti gli elementi necessari
-        # (contesto z + singoli rischi + rischio combinato) affinché il modello possa diagnosticare la sepsi
-        input_sepsis = torch.cat([z, p_inf, p_org, p_inf * p_org], dim=1)
-
-        # Calcola il logit finale per la sepsi e trasformalo nell'ultima probabilità
-        logit_sepsis = self.sepsis_head(input_sepsis)
         p_sepsis = torch.sigmoid(logit_sepsis)
-        
-        # ritorno tutte e 3 le probabilità: mi servono per calcolare la loss combinata
+
         return p_sepsis, p_inf, p_org
 
-# spazio di ricerca: le combinazioni di iperparametri da provare
 combinazioni_multitask = [(dim_z, lr, batch_size)
                            for dim_z in [32, 64, 128]
                            for lr in [0.001, 0.0003, 0.0001]
                            for batch_size in [128, 256, 512]]
 combinazioni_scelte_multitask = random.sample(combinazioni_multitask, 8)
 
-# il dataset di train non dipende dagli iperparametri, lo creo una volta sola fuori dal ciclo
 train_dataset = TensorDataset(X_train_tensor, Y_train_sepsi_tensor, Y_train_inf_tensor, Y_train_org_tensor)
 
-# sposto il validation sulla GPU una volta sola, lo riuso per ogni combinazione (evito trasferimenti ripetuti)
 X_val_device = X_val_tensor.to(device)
 
 miglior_auroc_globale = 0.0
@@ -164,13 +170,10 @@ for dim_z, lr, batch_size in combinazioni_scelte_multitask:
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    # creo un modello NUOVO per ogni combinazione (pesi casuali di partenza),
-    # altrimenti riuserei pesi già allenati dalla combinazione precedente
     model_temp = SepsisMultitaskParallelo(n_features=len(feature_cols), dim_z=dim_z).to(device)
     optimizer = torch.optim.Adam(model_temp.parameters(), lr=lr)
     loss_fn = nn.BCELoss()
 
-    # early stopping per QUESTA combinazione specifica
     miglior_auroc_val_combo = 0.0
     pazienza = 3
     epoche_senza_miglioramento = 0
@@ -214,7 +217,6 @@ for dim_z, lr, batch_size in combinazioni_scelte_multitask:
 
     print(f"Migliore AUROC sepsi per questa combinazione: {miglior_auroc_val_combo:.4f} (fermato all'epoca {epoca+1})")
 
-    # confronto col migliore globale visto finora tra TUTTE le combinazioni provate
     if miglior_auroc_val_combo > miglior_auroc_globale:
         miglior_auroc_globale = miglior_auroc_val_combo
         migliori_iperparametri = (dim_z, lr, batch_size)
@@ -224,27 +226,19 @@ print("\n=== RISULTATO FINALE RICERCA IPERPARAMETRI ===")
 print("Migliori iperparametri (dim_z, lr, batch_size):", migliori_iperparametri)
 print("Miglior AUROC sepsi validation:", miglior_auroc_globale)
 
-# ricostruisco il modello finale con i migliori iperparametri trovati, e ci carico i pesi migliori
 dim_z_finale, lr_finale, batch_size_finale = migliori_iperparametri
 model = SepsisMultitaskParallelo(n_features=len(feature_cols), dim_z=dim_z_finale).to(device)
 model.load_state_dict(migliori_pesi)
 
-# metto il modello in "modalità valutazione"
 model.eval()
 
-# torch.no_grad() disattiva il calcolo dei gradienti: durante la valutazione è
-# uno spreco di memoria e tempo
 with torch.no_grad():
     p_sepsis_val, p_inf_val, p_org_val = model(X_val_device)
 
-    # riporto le predizioni dalla GPU alla CPU e le converto in numpy:
-    # sklearn (che uso per calcolare l'AUROC) lavora con array numpy, non con tensori PyTorch/GPU
     p_sepsis_val = p_sepsis_val.cpu().numpy()
     p_inf_val = p_inf_val.cpu().numpy()
     p_org_val = p_org_val.cpu().numpy()
 
-# calcolo l'AUROC per ciascuno dei 3 task, confrontando le probabilità predette
-# con le vere label del validation set (stessa metrica che usavi per XGBoost/MLP/LSTM)
 auroc_sepsis = roc_auc_score(Y_val_sepsi, p_sepsis_val)
 auroc_inf = roc_auc_score(Y_val_inf, p_inf_val)
 auroc_org = roc_auc_score(Y_val_org, p_org_val)
@@ -262,7 +256,6 @@ auroc_inf_train = roc_auc_score(Y_train_inf, p_inf_train)
 auroc_org_train = roc_auc_score(Y_train_org, p_org_train)
 
 # --- Valutazione finale sul TEST SET ---
-# uso il modello con i migliori iperparametri e pesi trovati durante il tuning
 model.eval()
 with torch.no_grad():
     X_test_device = X_test_tensor.to(device)
@@ -285,3 +278,14 @@ print("\n--- Risultati Train Set (confronto overfitting) ---")
 print("AUROC sepsi (train):", auroc_sepsis_train, " vs validation:", auroc_sepsis)
 print("AUROC infezione (train):", auroc_inf_train, " vs validation:", auroc_inf)
 print("AUROC organo (train):", auroc_org_train, " vs validation:", auroc_org)
+
+# --- Utilità clinica (stessa metrica usata per XGBoost/MLP/LSTM) ---
+# converto le probabilità in predizioni binarie (soglia 0.5)
+t_sepsis_val = (p_sepsis_val > 0.5).astype(int)
+t_sepsis_test = (p_sepsis_test > 0.5).astype(int)
+
+punteggi_multitask_val = normalizza_punteggio(val_set["hours_to_sepsis"], val_set["is_sepsis"], t_sepsis_val.flatten())
+print("\nUtilità clinica normalizzata Multitask Parallelo (validation):", punteggi_multitask_val)
+
+punteggi_multitask_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_sepsis_test.flatten())
+print("Utilità clinica normalizzata Multitask Parallelo (test):", punteggi_multitask_test)
