@@ -255,7 +255,7 @@ auroc_sepsis_train = roc_auc_score(Y_train_sepsi, p_sepsis_train)
 auroc_inf_train = roc_auc_score(Y_train_inf, p_inf_train)
 auroc_org_train = roc_auc_score(Y_train_org, p_org_train)
 
-# --- Valutazione finale sul TEST SET ---
+# Valutazione finale sul TEST SET 
 model.eval()
 with torch.no_grad():
     X_test_device = X_test_tensor.to(device)
@@ -279,7 +279,7 @@ print("AUROC sepsi (train):", auroc_sepsis_train, " vs validation:", auroc_sepsi
 print("AUROC infezione (train):", auroc_inf_train, " vs validation:", auroc_inf)
 print("AUROC organo (train):", auroc_org_train, " vs validation:", auroc_org)
 
-# --- Utilità clinica (stessa metrica usata per XGBoost/MLP/LSTM) ---
+# Utilità clinica (stessa metrica usata per XGBoost/MLP/LSTM) 
 # converto le probabilità in predizioni binarie (soglia 0.5)
 t_sepsis_val = (p_sepsis_val > 0.5).astype(int)
 t_sepsis_test = (p_sepsis_test > 0.5).astype(int)
