@@ -4,27 +4,30 @@ import torch
 import torch.nn as nn
 import random
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 
 torch.manual_seed(42)
-random.seed(42)
+rng = random.Random(42)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Confronto y_true(reale) con le y_pred del modello per vedere quanto "bravo" è il modello
-# y_prob è la probabilità,AUROC e AUPRC le richiedono perchè misurano quanto bene il modello ordina i pazienti dal più al meno rischioso 
+#Confronto y_true(reale) con le y_pred del modello per vedere quanto "bravo" è il modello,y_prob è la probabilità,AUROC e AUPRC le richiedono perchè misurano quanto bene il modello ordina i pazienti dal più al meno rischioso 
 def evaluetion_metrics(y_true,y_pred,y_prob):
-    # quanto bene il modello distingue settici da non 
+    #quanto bene il modello distingue settici da non 
     auroc=roc_auc_score(y_true,y_prob)
-    # misura precisione e sensibilità
+    #misura precisione e sensibilità
     auprc=average_precision_score(y_true,y_prob)
-    # quante predizioni sono corrette(sul totale)
+    #quante predizioni sono corrette(sul totale)
     accuracy=accuracy_score(y_true,y_pred)
-    # bilancia i falsi positivi e i falsi negativi 
+    #tra tutti quelli che il modello dice "sepsi", quanti lo sono davvero
+    precision=precision_score(y_true,y_pred)
+    #tra tutti i veri settici, quanti il modello riesce a beccare
+    recall=recall_score(y_true,y_pred)
+    #bilancia i falsi positivi e i falsi negativi 
     f1=f1_score(y_true,y_pred)
-    print("\nAUROC",auroc,"\n\nAUPRC",auprc,"\n\nAccuracy",accuracy,"\n\nF1 Score",f1,"\n")
-    return{"AUROC":auroc,"AUPRC":auprc,"Accuracy":accuracy,"F1 Score":f1}
+    print("\nAUROC",auroc,"\n\nAUPRC",auprc,"\n\nAccuracy",accuracy,"\n\nPrecision",precision,"\n\nRecall",recall,"\n\nF1 Score",f1,"\n")
+    return{"AUROC":auroc,"AUPRC":auprc,"Accuracy":accuracy,"Precision":precision,"Recall":recall,"F1 Score":f1}
 
 # Sto calcolando i punteggi da dare come nel paper (PhysioNet)
 # NB: la finestra di reward/penalità per pazienti settici si estende da 12h prima dell'onset
@@ -160,7 +163,7 @@ combinazioni_mlp = [(units, lr, batch_size)
                      for units in [64, 128, 256]
                      for lr in [0.001, 0.0003, 0.0001]
                      for batch_size in [128, 256]]
-combinazioni_scelte_mlp = random.sample(combinazioni_mlp, 10)
+combinazioni_scelte_mlp = rng.sample(combinazioni_mlp, 10)
 
 train_dataset = TensorDataset(X_train_tensor, Y_train_tensor)
 X_val_device = X_val_tensor.to(device)

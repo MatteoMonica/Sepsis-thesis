@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.metrics import roc_auc_score,average_precision_score, accuracy_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
 from sklearn.model_selection import GridSearchCV
 
@@ -12,10 +12,14 @@ def evaluetion_metrics(y_true,y_pred,y_prob):
     auprc=average_precision_score(y_true,y_prob)
     #quante predizioni sono corrette(sul totale)
     accuracy=accuracy_score(y_true,y_pred)
+    #tra tutti quelli che il modello dice "sepsi", quanti lo sono davvero
+    precision=precision_score(y_true,y_pred)
+    #tra tutti i veri settici, quanti il modello riesce a beccare
+    recall=recall_score(y_true,y_pred)
     #bilancia i falsi positivi e i falsi negativi 
     f1=f1_score(y_true,y_pred)
-    print("\nAUROC",auroc,"\n\nAUPRC",auprc,"\n\nAccuracy",accuracy,"\n\nF1 Score",f1,"\n")
-    return{"AUROC":auroc,"AUPRC":auprc,"Accuracy":accuracy,"F1 Score":f1}
+    print("\nAUROC",auroc,"\n\nAUPRC",auprc,"\n\nAccuracy",accuracy,"\n\nPrecision",precision,"\n\nRecall",recall,"\n\nF1 Score",f1,"\n")
+    return{"AUROC":auroc,"AUPRC":auprc,"Accuracy":accuracy,"Precision":precision,"Recall":recall,"F1 Score":f1}
 
 #Sto calcolando i punteggi da dare come nel paper (PhysioNet)
 #NB: la finestra di reward/penalità per pazienti settici si estende da 12h prima dell'onset

@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 import random
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 
 torch.manual_seed(42)
-random.seed(42)
+rng = random.Random(42)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -30,13 +30,22 @@ def crea_sequenze(dataset,feature_cols,n_ore):
             Y_label.append(group[group["hour_index"] == t]["label_sepsis_6h"].values[0])
     return np.array(X_sequenze),np.array(Y_label) 
 
+#Confronto y_true(reale) con le y_pred del modello per vedere quanto "bravo" è il modello,y_prob è la probabilità,AUROC e AUPRC le richiedono perchè misurano quanto bene il modello ordina i pazienti dal più al meno rischioso 
 def evaluetion_metrics(y_true,y_pred,y_prob):
+    #quanto bene il modello distingue settici da non 
     auroc=roc_auc_score(y_true,y_prob)
+    #misura precisione e sensibilità
     auprc=average_precision_score(y_true,y_prob)
+    #quante predizioni sono corrette(sul totale)
     accuracy=accuracy_score(y_true,y_pred)
+    #tra tutti quelli che il modello dice "sepsi", quanti lo sono davvero
+    precision=precision_score(y_true,y_pred)
+    #tra tutti i veri settici, quanti il modello riesce a beccare
+    recall=recall_score(y_true,y_pred)
+    #bilancia i falsi positivi e i falsi negativi 
     f1=f1_score(y_true,y_pred)
-    print("\nAUROC",auroc,"\n\nAUPRC",auprc,"\n\nAccuracy",accuracy,"\n\nF1 Score",f1,"\n")
-    return{"AUROC":auroc,"AUPRC":auprc,"Accuracy":accuracy,"F1 Score":f1}
+    print("\nAUROC",auroc,"\n\nAUPRC",auprc,"\n\nAccuracy",accuracy,"\n\nPrecision",precision,"\n\nRecall",recall,"\n\nF1 Score",f1,"\n")
+    return{"AUROC":auroc,"AUPRC":auprc,"Accuracy":accuracy,"Precision":precision,"Recall":recall,"F1 Score":f1}
 
 def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
     if is_sepsis == False:
@@ -185,7 +194,7 @@ combinazioni_lstm = [(units, lr, batch_size)
                       for units in [64, 128]
                       for lr in [0.001, 0.0003, 0.0001]
                       for batch_size in [128, 256]]
-combinazioni_scelte_lstm = random.sample(combinazioni_lstm, 10)
+combinazioni_scelte_lstm = rng.sample(combinazioni_lstm, 10)
 
 train_dataset_seq = TensorDataset(X_train_seq_tensor, Y_train_seq_tensor)
 

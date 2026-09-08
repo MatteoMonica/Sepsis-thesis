@@ -3,11 +3,12 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 import random
 
 torch.manual_seed(42)  # stessa pratica di riproducibilità usata per MLP/LSTM
+rng = random.Random(42)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -155,7 +156,7 @@ combinazioni_multitask = [(dim_z, lr, batch_size)
                            for dim_z in [32, 64, 128]
                            for lr in [0.001, 0.0003, 0.0001]
                            for batch_size in [128, 256, 512]]
-combinazioni_scelte_multitask = random.sample(combinazioni_multitask, 8)
+combinazioni_scelte_multitask = rng.sample(combinazioni_multitask, 8)
 
 train_dataset = TensorDataset(X_train_tensor, Y_train_sepsi_tensor, Y_train_inf_tensor, Y_train_org_tensor)
 
@@ -269,23 +270,44 @@ auroc_sepsis_test = roc_auc_score(Y_test_sepsi, p_sepsis_test)
 auroc_inf_test = roc_auc_score(Y_test_inf, p_inf_test)
 auroc_org_test = roc_auc_score(Y_test_org, p_org_test)
 
+# calcolo le predizioni binarie (soglia 0.5), servono sia per le metriche sotto sia per l'utilità clinica
+t_sepsis_val = (p_sepsis_val > 0.5).astype(int)
+t_sepsis_test = (p_sepsis_test > 0.5).astype(int)
+
+# metriche complete sul task sepsi (validation e test)
+accuracy_val = accuracy_score(Y_val_sepsi, t_sepsis_val)
+precision_val = precision_score(Y_val_sepsi, t_sepsis_val)
+recall_val = recall_score(Y_val_sepsi, t_sepsis_val)
+f1_val = f1_score(Y_val_sepsi, t_sepsis_val)
+auprc_val = average_precision_score(Y_val_sepsi, p_sepsis_val)
+
+accuracy_test = accuracy_score(Y_test_sepsi, t_sepsis_test)
+precision_test = precision_score(Y_test_sepsi, t_sepsis_test)
+recall_test = recall_score(Y_test_sepsi, t_sepsis_test)
+f1_test = f1_score(Y_test_sepsi, t_sepsis_test)
+auprc_test = average_precision_score(Y_test_sepsi, p_sepsis_test)
+
+print("\n--- Risultati Validation Set (sepsi, metriche complete) ---")
+print("AUROC:", auroc_sepsis, "\nAUPRC:", auprc_val, "\nAccuracy:", accuracy_val, "\nPrecision:", precision_val, "\nRecall:", recall_val, "\nF1 Score:", f1_val)
+
 print("\n--- Risultati Test Set (valutazione finale) ---")
 print("AUROC sepsi (test):", auroc_sepsis_test)
 print("AUROC infezione (test):", auroc_inf_test)
 print("AUROC organo (test):", auroc_org_test)
+print("AUPRC sepsi (test):", auprc_test)
+print("Accuracy sepsi (test):", accuracy_test)
+print("Precision sepsi (test):", precision_test)
+print("Recall sepsi (test):", recall_test)
+print("F1 Score sepsi (test):", f1_test)
 
 print("\n--- Risultati Train Set (confronto overfitting) ---")
 print("AUROC sepsi (train):", auroc_sepsis_train, " vs validation:", auroc_sepsis)
 print("AUROC infezione (train):", auroc_inf_train, " vs validation:", auroc_inf)
 print("AUROC organo (train):", auroc_org_train, " vs validation:", auroc_org)
 
-# Utilità clinica (stessa metrica usata per XGBoost/MLP/LSTM) 
-# converto le probabilità in predizioni binarie (soglia 0.5)
-t_sepsis_val = (p_sepsis_val > 0.5).astype(int)
-t_sepsis_test = (p_sepsis_test > 0.5).astype(int)
+# Utilità clinica
+punteggi_cascade_val = normalizza_punteggio(val_set["hours_to_sepsis"], val_set["is_sepsis"], t_sepsis_val.flatten())
+print("\nUtilità clinica normalizzata Multitask Parallelo (validation):", punteggi_cascade_val)
 
-punteggi_multitask_val = normalizza_punteggio(val_set["hours_to_sepsis"], val_set["is_sepsis"], t_sepsis_val.flatten())
-print("\nUtilità clinica normalizzata Multitask Parallelo (validation):", punteggi_multitask_val)
-
-punteggi_multitask_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_sepsis_test.flatten())
-print("Utilità clinica normalizzata Multitask Parallelo (test):", punteggi_multitask_test)
+punteggi_cascade_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_sepsis_test.flatten())
+print("Utilità clinica normalizzata Multitask Parallelo (test):", punteggi_cascade_test)
