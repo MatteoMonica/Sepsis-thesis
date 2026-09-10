@@ -233,7 +233,7 @@ def carica_pazienti():
     # aggiungo anchor_year_group da patients.csv.gz per il temporal split
     patients_info = pd.read_csv(
     f"{DATA_DIR}/patients.csv.gz",
-    usecols=["subject_id", "anchor_year_group"] )
+    usecols=["subject_id", "anchor_age", "anchor_year", "anchor_year_group"])
     pazienti = pazienti.merge(patients_info, on="subject_id", how="left")
     return pazienti
 

@@ -102,8 +102,7 @@ train_set=file[file["subject_id"].isin(train_ids)].sort_values(["subject_id","ho
 
 # NB: includo anche label_infection_6h e label_organ_6h tra le colonne da escludere,
 # altrimenti restano come feature e causano leakage (errore già corretto nell'MLP)
-colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
-
+colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","anchor_age","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
 X_train=train_set.drop(colonne_da_escludere,axis=1)
 Y_train=train_set["label_sepsis_6h"]
 X_val=validation_set.drop(colonne_da_escludere,axis=1)

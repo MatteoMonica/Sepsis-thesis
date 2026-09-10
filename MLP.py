@@ -6,6 +6,8 @@ import random
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
+import shap
+import matplotlib.pyplot as plt
 
 torch.manual_seed(42)
 rng = random.Random(42)
@@ -69,6 +71,17 @@ def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
    U_optimal=sum([calcola_punteggio(ore,1,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
    return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
 
+
+# Creo una versione del modello che restituisce il logit (prima della sigmoid),
+# perché DeepExplainer lavora meglio su output lineari che su output "schiacciati" da sigmoid/softmax
+class SepsisMLPLogit(nn.Module):
+    def __init__(self, mlp_originale):
+        super().__init__()
+        self.rete = mlp_originale.rete  # riuso gli stessi pesi già allenati
+
+    def forward(self, x):
+        return self.rete(x)  # niente sigmoid qui, mi fermo al logit
+
 # Leggo il mio file 
 file= pd.read_csv("sepsis3_hourly_labeled.csv")
 
@@ -97,8 +110,7 @@ validation_set=file[file["subject_id"].isin(val_ids)].sort_values(["subject_id",
 train_set=file[file["subject_id"].isin(train_ids)].sort_values(["subject_id","hour_index"]).reset_index(drop=True)
 
 # Tolgo le colonne identificative e la label dalla X (incluse quelle anti-leakage SOFA)
-colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
-
+colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","anchor_age","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
 X_train=train_set.drop(colonne_da_escludere,axis=1)
 Y_train=train_set["label_sepsis_6h"]
 
@@ -126,6 +138,7 @@ X_test_scaled = scaler.transform(X_test_ffill)
 X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
 X_val_tensor = torch.tensor(X_val_scaled, dtype=torch.float32)
 X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
+print("Shape X_test_tensor:", X_test_tensor.shape)
 
 Y_train_tensor = torch.tensor(Y_train.values, dtype=torch.float32).view(-1, 1)
 Y_val_tensor = torch.tensor(Y_val.values, dtype=torch.float32).view(-1, 1)
@@ -257,3 +270,41 @@ print("\nMLP Test Set:")
 evaluetion_metrics(Y_test, t_test_mlp, t_test_prob)
 punteggi_mlp_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_test_mlp)
 print("Media utilità clinica MLP Test set:", punteggi_mlp_test)
+
+# DeepExplainer ha bisogno di un campione di dati per stimare il valore atteso come output del modello 
+background = X_train_tensor[:100].to(device)
+
+# Campiono il test set per SHAP, stessa logica usata per XGBoost 
+np.random.seed(42)
+indici_campione = np.random.choice(X_test_tensor.shape[0], size=2000, replace=False)
+X_test_sample = X_test_tensor[indici_campione].to(device)
+
+
+# Creo l'istanza vera e propria del modello "senza sigmoid", riusando i pesi di mlp
+mlp_logit = SepsisMLPLogit(mlp).to(device)
+mlp_logit.eval()
+
+# Stima gli SHAP confrontando l'output sui dati reali con quelli sul background 
+explainer = shap.DeepExplainer(mlp_logit, background)
+
+# Calcolo i valori di SHAP sul campione di test
+shap_values = explainer.shap_values(X_test_sample)
+shap_values = shap_values[:, :, 0]
+
+# Siccome il tensor lavora sulla GPU mentre SHAP e matplot lavorano sulla cpu
+X_test_sample_np = X_test_sample.cpu().numpy()
+X_test_sample_df = pd.DataFrame(X_test_sample_np, columns=feature_cols)
+
+
+
+# Primo grafico importanza media delle feature
+shap.summary_plot(shap_values, X_test_sample_df, plot_type="bar", show=False)
+plt.tight_layout()
+plt.savefig("MLP_Plot_feature.png", dpi=150)
+plt.close()
+
+# Secondo grafico beeswarm con direzione dell'effetto
+shap.summary_plot(shap_values, X_test_sample_df, show=False)
+plt.tight_layout()
+plt.savefig("MLP_Plot_completo.png", dpi=150)
+plt.close()

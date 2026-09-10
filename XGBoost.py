@@ -3,6 +3,8 @@ import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
 from sklearn.model_selection import GridSearchCV
+import shap
+import matplotlib.pyplot as plt
 
 #Confronto y_true(reale) con le y_pred del modello per vedere quanto "bravo" è il modello,y_prob è la probabilità,AUROC e AUPRC le richiedono perchè misurano quanto bene il modello ordina i pazienti dal più al meno rischioso 
 def evaluetion_metrics(y_true,y_pred,y_prob):
@@ -97,8 +99,7 @@ train_set=file[file["subject_id"].isin(train_ids)].sort_values(["subject_id","ho
 
 # NB: includo anche label_infection_6h e label_organ_6h tra le colonne da escludere,
 # altrimenti restano come feature e causano leakage (stesso errore corretto in MLP/LSTM)
-colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
-
+colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","anchor_age","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
 X_train=train_set.drop(colonne_da_escludere,axis=1)
 Y_train=train_set["label_sepsis_6h"]
 
@@ -165,3 +166,33 @@ t_xgb_test_prob = model.predict_proba(pd.DataFrame(X_test_ffill, columns=feature
 evaluetion_metrics(Y_test, t_test_xgb, t_xgb_test_prob)
 punteggi_xgb_test=normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"],t_test_xgb)
 print("Media utilità clinica XGBoost Test set:", punteggi_xgb_test)
+
+# Implementazione della Explainable AI Shap per XGBoost
+# TreeExplainer è ottimizzato per l'uso su modelli ad alberi (XGBoost,ecc)
+# Calcola i valori di SHAP usando la struttura degli alberi
+explainer = shap.TreeExplainer(model) 
+
+# Campiono il test set perchè altrimenti calcolare lo SHAP su tutti i dati sarebbe troppo lento
+X_test_sample = pd.DataFrame(X_test_ffill,columns=feature_cols).sample(n=2000,random_state=42)
+
+# Calcolo i valori di SHAP che è una matrice (righe,feature)
+shap_values = explainer.shap_values(X_test_sample)
+
+# Primo Grafico mostra su tutto il campione quanto ogni feature influenza la predizione
+# Una feature può essere importante sia in positivo che in negativo
+shap.summary_plot(shap_values, X_test_sample, plot_type="bar", show=False)
+plt.tight_layout()
+plt.savefig("Plot_feature.png",dpi=150)
+plt.close
+
+# Il secondo grafico è il Plot completo è come quello sopra solo che qui mostra anceh la direzione
+# (rosso val. feature alto, blue val. feature basso)e la distribuzione dei valori SHAP per ogni feature
+shap.summary_plot(shap_values,X_test_sample,show=False)
+plt.tight_layout()
+plt.savefig("Plot_completo.png",dpi=150)
+plt.close
+
+# Dependence plot su Age, guardo come varia lo SHAP value al variare dell'età
+shap.dependence_plot("Age", shap_values, X_test_sample, show=False)
+plt.savefig("Dependence_Age.png", bbox_inches="tight", dpi=150)
+plt.close()
