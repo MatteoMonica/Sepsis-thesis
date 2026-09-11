@@ -17,7 +17,8 @@ CHART_MAP = {
     220052: "MAP",
     220277: "O2Sat",
     220210: "RR",
-    226329: "Temp",
+    223761: "Temp",   # Fahrenheit la fonte principale
+    223762: "Temp",   # Celsius copertura minore ma va inclusa
     220050: "SBP",
     225309: "SBP",
     228232: "SBP",
@@ -355,6 +356,7 @@ def aggregate_chart_events(eligible_stays, hourly_grid):
         item_ids=set(CHART_MAP),
         join_keys=eligible_keys,
     )
+    
 
     # se non trovo nulla restituisco solo le chiavi vuote, così il merge a valle non si rompe
     if not chart_chunks:
@@ -365,6 +367,10 @@ def aggregate_chart_events(eligible_stays, hourly_grid):
     chart_events["charttime"] = pd.to_datetime(chart_events["charttime"], errors="coerce")
     # traduco l'itemid nel nome variabile leggibile usando la mappa
     chart_events["variable"] = chart_events["itemid"].map(CHART_MAP)
+    # converto Temperature Fahrenheit in Celsius, per uniformare
+    # con l'altro itemid della stessa variabile 
+    mask_fahrenheit = chart_events["itemid"] == 223761
+    chart_events.loc[mask_fahrenheit, "valuenum"] = (chart_events.loc[mask_fahrenheit, "valuenum"] - 32) * 5/9
     # butto via le righe senza orario, senza valore o senza variabile riconosciuta
     chart_events = chart_events.dropna(subset=["charttime", "valuenum", "variable"])
 
@@ -397,6 +403,7 @@ def aggregate_chart_events(eligible_stays, hourly_grid):
         .unstack()
         .reset_index()
     )
+    
 
     print(f"Shape delle variabili da chartevents: {chart_hourly.shape}")
     return chart_hourly

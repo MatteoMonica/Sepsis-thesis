@@ -99,7 +99,7 @@ train_set=file[file["subject_id"].isin(train_ids)].sort_values(["subject_id","ho
 
 # NB: includo anche label_infection_6h e label_organ_6h tra le colonne da escludere,
 # altrimenti restano come feature e causano leakage (stesso errore corretto in MLP/LSTM)
-colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","anchor_age","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
+colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","EtCO2","SaO2","anchor_year_group","anchor_age","anchor_year","hour_index","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
 X_train=train_set.drop(colonne_da_escludere,axis=1)
 Y_train=train_set["label_sepsis_6h"]
 
@@ -157,7 +157,7 @@ t_xgb_prob = model.predict_proba(pd.DataFrame(X_val_ffill, columns=feature_cols)
 evaluetion_metrics(Y_val,pred_xgb,t_xgb_prob)
 #Calcolo l'utilità clinica normalizzata, passo le ore mancanti alla sepsi, se il paziente è settico e le predizioni del modello t sono le predizioni di XGBoost
 punteggi_xgb = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], pred_xgb)
-print("Utilità clinica normalizzata XGBoost:", punteggi_xgb)
+print("Utilita' clinica normalizzata XGBoost:", punteggi_xgb)
 
 print("\n ---------- Test Set ----------")
 #Risultati del Test Set
@@ -165,7 +165,7 @@ print("\nXGBOOST Test Set: ")
 t_xgb_test_prob = model.predict_proba(pd.DataFrame(X_test_ffill, columns=feature_cols))[:, 1]
 evaluetion_metrics(Y_test, t_test_xgb, t_xgb_test_prob)
 punteggi_xgb_test=normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"],t_test_xgb)
-print("Media utilità clinica XGBoost Test set:", punteggi_xgb_test)
+print("Media utilita' clinica XGBoost Test set:", punteggi_xgb_test)
 
 # Implementazione della Explainable AI Shap per XGBoost
 # TreeExplainer è ottimizzato per l'uso su modelli ad alberi (XGBoost,ecc)
@@ -182,17 +182,17 @@ shap_values = explainer.shap_values(X_test_sample)
 # Una feature può essere importante sia in positivo che in negativo
 shap.summary_plot(shap_values, X_test_sample, plot_type="bar", show=False)
 plt.tight_layout()
-plt.savefig("Plot_feature.png",dpi=150)
+plt.savefig("XGB_Plot_feature.png",dpi=150)
 plt.close
 
 # Il secondo grafico è il Plot completo è come quello sopra solo che qui mostra anceh la direzione
 # (rosso val. feature alto, blue val. feature basso)e la distribuzione dei valori SHAP per ogni feature
 shap.summary_plot(shap_values,X_test_sample,show=False)
 plt.tight_layout()
-plt.savefig("Plot_completo.png",dpi=150)
+plt.savefig("XGB_Plot_completo.png",dpi=150)
 plt.close
 
 # Dependence plot su Age, guardo come varia lo SHAP value al variare dell'età
 shap.dependence_plot("Age", shap_values, X_test_sample, show=False)
-plt.savefig("Dependence_Age.png", bbox_inches="tight", dpi=150)
+plt.savefig("XGB_Dependence_Age.png", bbox_inches="tight", dpi=150)
 plt.close()

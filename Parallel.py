@@ -68,13 +68,11 @@ val_set = file[file["subject_id"].isin(val_ids)].sort_values(["subject_id","hour
 test_set = file[file["subject_id"].isin(test_ids)].sort_values(["subject_id","hour_index"]).reset_index(drop=True)
 
 # Stesse colonne da escludere ( incluse quelle anti-leakage) 
-colonne_da_escludere = [
-    "subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h",
-    "Gender","hour_start","hour_end","intime","antibiotic_time","culture_time",
-    "suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis",
-    "sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI",
-    "anchor_year_group","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"
-]
+colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender",
+                        "hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time",
+                        "sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2",
+                        "TroponinI","EtCO2","SaO2","anchor_year_group","anchor_age","anchor_year","hour_index","respiration","coagulation",
+                        "liver","cardiovascular","cns","renal","icu_hours"]
 
 X_train = train_set.drop(colonne_da_escludere, axis=1)
 X_val = val_set.drop(colonne_da_escludere, axis=1)
@@ -287,27 +285,28 @@ recall_test = recall_score(Y_test_sepsi, t_sepsis_test)
 f1_test = f1_score(Y_test_sepsi, t_sepsis_test)
 auprc_test = average_precision_score(Y_test_sepsi, p_sepsis_test)
 
-print("\n--- Risultati Validation Set (sepsi, metriche complete) ---")
+print("\n---------- Validation Set ----------")
+print("\nParallelo:")
 print("AUROC:", auroc_sepsis, "\nAUPRC:", auprc_val, "\nAccuracy:", accuracy_val, "\nPrecision:", precision_val, "\nRecall:", recall_val, "\nF1 Score:", f1_val)
 
-print("\n--- Risultati Test Set (valutazione finale) ---")
-print("AUROC sepsi (test):", auroc_sepsis_test)
-print("AUROC infezione (test):", auroc_inf_test)
-print("AUROC organo (test):", auroc_org_test)
-print("AUPRC sepsi (test):", auprc_test)
-print("Accuracy sepsi (test):", accuracy_test)
-print("Precision sepsi (test):", precision_test)
-print("Recall sepsi (test):", recall_test)
-print("F1 Score sepsi (test):", f1_test)
+punteggi_parallelo_val = normalizza_punteggio(val_set["hours_to_sepsis"], val_set["is_sepsis"], t_sepsis_val.flatten())
+print("Utilita' clinica normalizzata Multitask Parallelo:", punteggi_parallelo_val)
+
+print("\n---------- Test Set ----------")
+print("\nParallelo Test Set:")
+print("AUROC sepsi:", auroc_sepsis_test)
+print("AUROC infezione:", auroc_inf_test)
+print("AUROC organo:", auroc_org_test)
+print("AUPRC sepsi:", auprc_test)
+print("Accuracy sepsi:", accuracy_test)
+print("Precision sepsi:", precision_test)
+print("Recall sepsi:", recall_test)
+print("F1 Score sepsi:", f1_test)
+
+punteggi_parallelo_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_sepsis_test.flatten())
+print("Media utilita' clinica Parallelo Test set:", punteggi_parallelo_test)
 
 print("\n--- Risultati Train Set (confronto overfitting) ---")
-print("AUROC sepsi (train):", auroc_sepsis_train, " vs validation:", auroc_sepsis)
-print("AUROC infezione (train):", auroc_inf_train, " vs validation:", auroc_inf)
-print("AUROC organo (train):", auroc_org_train, " vs validation:", auroc_org)
-
-# Utilità clinica
-punteggi_cascade_val = normalizza_punteggio(val_set["hours_to_sepsis"], val_set["is_sepsis"], t_sepsis_val.flatten())
-print("\nUtilità clinica normalizzata Multitask Parallelo (validation):", punteggi_cascade_val)
-
-punteggi_cascade_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_sepsis_test.flatten())
-print("Utilità clinica normalizzata Multitask Parallelo (test):", punteggi_cascade_test)
+print("AUROC sepsi:", auroc_sepsis_train, " vs validation:", auroc_sepsis)
+print("AUROC infezione:", auroc_inf_train, " vs validation:", auroc_inf)
+print("AUROC organo:", auroc_org_train, " vs validation:", auroc_org)

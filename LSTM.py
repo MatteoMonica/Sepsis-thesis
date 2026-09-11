@@ -6,6 +6,8 @@ import random
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
+import shap
+import matplotlib.pyplot as plt
 
 torch.manual_seed(42)
 rng = random.Random(42)
@@ -102,7 +104,7 @@ train_set=file[file["subject_id"].isin(train_ids)].sort_values(["subject_id","ho
 
 # NB: includo anche label_infection_6h e label_organ_6h tra le colonne da escludere,
 # altrimenti restano come feature e causano leakage (errore già corretto nell'MLP)
-colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","anchor_year_group","anchor_age","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
+colonne_da_escludere = ["subject_id","hadm_id","stay_id","label_sepsis_6h","label_infection_6h","label_organ_6h","Gender","hour_start","hour_end","intime","antibiotic_time","culture_time","suspected_infection_time","sofa_time","sepsis3","sepsis_onset","is_sepsis","sofa_score","sepsis_onset_hour","hours_to_sepsis","FiO2","HCO3","PaCO2","TroponinI","EtCO2","SaO2","anchor_year_group","anchor_age","anchor_year","hour_index","respiration","coagulation","liver","cardiovascular","cns","renal","icu_hours"]
 X_train=train_set.drop(colonne_da_escludere,axis=1)
 Y_train=train_set["label_sepsis_6h"]
 X_val=validation_set.drop(colonne_da_escludere,axis=1)
@@ -276,3 +278,62 @@ print("\nLSTM Test Set:")
 evaluetion_metrics(Y_test_seq, t_test_lstm, t_test_prob)
 punteggi_lstm_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_test_lstm)
 print("Media utilità clinica LSTM Test set:", punteggi_lstm_test)
+
+import shap
+import matplotlib.pyplot as plt
+
+# sposto il modello su CPU, alcune versioni di SHAP hanno problemi di compatibilità
+# con operazioni LSTM su GPU
+lstm_cpu = lstm.to("cpu")
+lstm_cpu.eval()
+
+# punto di riferimento per calcolare quanto ogni feature si scosta dalla norma
+background = X_train_seq_tensor[:100].to("cpu")
+
+# campiono il test set, con le sequenze, GradientExplainer è più lento di
+# TreeExplainer, quindi uso un campione più piccolo 
+rng_shap = np.random.RandomState(42)
+test_sample_idx = rng_shap.choice(len(X_test_seq_tensor), size=200, replace=False)
+test_sample = X_test_seq_tensor[test_sample_idx].to("cpu")
+
+explainer = shap.GradientExplainer(lstm_cpu, background)
+shap_values = explainer.shap_values(test_sample)
+
+# shap_values ha forma (200, 24, 34), un valore per ogni (esempio, ora, feature).
+# Se viene restituito come lista (un elemento per output del modello), prendo il primo
+if isinstance(shap_values, list):
+    shap_values = shap_values[0]
+shap_values = np.array(shap_values).reshape(200, 24, len(feature_cols))
+
+# Aggregazione 1: importanza per FEATURE, sommando il valore assoluto su tutte le 24 ore
+# così ottengo un singolo numero per, confrontabile con il caso XGBoost
+importanza_per_feature = np.abs(shap_values).sum(axis=1)  
+importanza_media = importanza_per_feature.mean(axis=0)     
+
+# ordino le feature dalla più alla meno importante
+ordine = np.argsort(importanza_media)[::-1]
+feature_ordinate = [feature_cols[i] for i in ordine]
+valori_ordinati = importanza_media[ordine]
+
+plt.figure(figsize=(8, 10))
+plt.barh(feature_ordinate[:20][::-1], valori_ordinati[:20][::-1])
+plt.xlabel("Importanza media (|valore SHAP| sommato sulle 24 ore)")
+plt.title("LSTM - Importanza globale delle feature (top 20)")
+plt.tight_layout()
+plt.savefig("LSTM_Plot_globale.png", dpi=150)
+plt.close()
+
+# Aggregazione 2: importanza per ORA, per vedere se le ore più recenti
+# contano di più di quelle più lontane nel tempo (plausibile clinicamente) 
+importanza_per_ora = np.abs(shap_values).mean(axis=(0, 2))  
+
+plt.figure(figsize=(8, 4))
+plt.plot(range(1, 25), importanza_per_ora, marker="o")
+plt.xlabel("Ora nella sequenza (24 = ora più recente)")
+plt.ylabel("Importanza media |SHAP|")
+plt.title("LSTM - Importanza media per ora della sequenza")
+plt.tight_layout()
+plt.savefig("LSTM_Plot_temporale.png", dpi=150)
+plt.close()
+
+print("\nGrafici SHAP LSTM salvati: shap_lstm_importanza_globale.png, shap_lstm_importanza_temporale.png")
