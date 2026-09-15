@@ -6,6 +6,8 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 import random
+import shap
+import matplotlib.pyplot as plt
 
 torch.manual_seed(42)  # stessa pratica di riproducibilità usata per MLP/LSTM
 rng = random.Random(42)
@@ -310,3 +312,54 @@ print("\n--- Risultati Train Set (confronto overfitting) ---")
 print("AUROC sepsi:", auroc_sepsis_train, " vs validation:", auroc_sepsis)
 print("AUROC infezione:", auroc_inf_train, " vs validation:", auroc_inf)
 print("AUROC organo:", auroc_org_train, " vs validation:", auroc_org)
+
+
+# Explainable AI SHAP per il modello multitask Parallelo 
+model_cpu = model.to("cpu")
+model_cpu.eval()
+
+# il modello ha 3 output (p_sepsis, p_inf, p_org)
+# uno per ciascun output, perché SHAP lavora su modelli con un solo output alla volta
+class WrapperOutput(nn.Module):
+    def __init__(self, modello, indice_output):
+        super().__init__()
+        self.modello = modello
+        self.indice_output = indice_output  # 0=sepsis, 1=inf, 2=org
+
+    def forward(self, x):
+        outputs = self.modello(x)  # tupla (p_sepsis, p_inf, p_org)
+        return outputs[self.indice_output]
+
+background = X_train_tensor[:100].to("cpu")
+rng_shap = np.random.RandomState(42)
+test_sample_idx = rng_shap.choice(len(X_test_tensor), size=500, replace=False)
+test_sample = X_test_tensor[test_sample_idx].to("cpu")
+test_sample_df = pd.DataFrame(test_sample.numpy(), columns=feature_cols)
+
+nomi_task = ["sepsis", "infezione", "organo"]
+
+for indice_output, nome_task in enumerate(nomi_task):
+    print(f"\nCalcolo SHAP per il task: {nome_task}")
+
+    wrapper = WrapperOutput(model_cpu, indice_output)
+    explainer = shap.GradientExplainer(wrapper, background)
+    shap_values = explainer.shap_values(test_sample)
+
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+    shap_values = np.array(shap_values).reshape(len(test_sample), len(feature_cols))
+
+    importanza_media = np.abs(shap_values).mean(axis=0)
+    ordine = np.argsort(importanza_media)[::-1]
+    feature_ordinate = [feature_cols[i] for i in ordine]
+    valori_ordinati = importanza_media[ordine]
+
+    plt.figure(figsize=(8, 10))
+    plt.barh(feature_ordinate[:20][::-1], valori_ordinati[:20][::-1])
+    plt.xlabel("Importanza media |valore SHAP|")
+    plt.title(f"Multitask Parallelo - Importanza feature per task: {nome_task}")
+    plt.tight_layout()
+    plt.savefig(f"Parallelo_{nome_task}.png", dpi=150)
+    plt.close()
+
+print("\nGrafici SHAP multitask Parallelo salvati per tutti e 3 i task.")
