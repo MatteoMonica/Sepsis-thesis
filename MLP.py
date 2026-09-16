@@ -8,6 +8,8 @@ from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_sco
 from sklearn.preprocessing import StandardScaler
 import shap
 import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 torch.manual_seed(42)
 rng = random.Random(42)
@@ -65,11 +67,17 @@ def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
                 return -2    
 
 # Sto normalizzando i punteggicome nel paper
-def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
-   U_totale = sum([calcola_punteggio(ore, pred, sepsi) for ore, pred, sepsi in zip(hours_to_sepsis_list, prediction, is_sepsis_list)])
-   U_no_predictions=sum([calcola_punteggio(ore, 0, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
-   U_optimal=sum([calcola_punteggio(ore,1,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
-   return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
+def punteggio_ottimale(hours_to_sepsis, is_sepsis):
+    return max(
+        calcola_punteggio(hours_to_sepsis, 1, is_sepsis),
+        calcola_punteggio(hours_to_sepsis, 0, is_sepsis)
+    )
+
+def normalizza_punteggio(hours_to_sepsis_list, is_sepsis_list, prediction):
+    U_totale = sum(calcola_punteggio(ore, pred, sepsi) for ore, pred, sepsi in zip(hours_to_sepsis_list, prediction, is_sepsis_list))
+    U_no_predictions = sum(calcola_punteggio(ore, 0, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list))
+    U_optimal = sum(punteggio_ottimale(ore, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list))
+    return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
 
 
 # Creo una versione del modello che restituisce il logit (prima della sigmoid),
@@ -148,8 +156,7 @@ print("Numero feature:", len(feature_cols))
 print("Shape X_train_tensor:", X_train_tensor.shape)
 
 
-# stessa architettura Dense(units)->Dense(32)->Dense(1,sigmoid) che avevi in Keras,
-# tradotta in PyTorch: nn.Linear + ReLU al posto di Dense(activation="relu"),
+# stessa architettura Dense(units)->Dense(32)->Dense(1,sigmoid) che avevo in Keras,
 # sigmoid finale applicata nel forward come per il multitask
 class SepsisMLP(nn.Module):
     def __init__(self, n_features, units):
@@ -168,7 +175,7 @@ class SepsisMLP(nn.Module):
         return p
 
 
-# Tuning manuale MLP 
+# Tuning manuale MLP, ripetuto per più seed per calcolare media e deviazione standard
 # rispetto alla versione Keras, qui "epochs" non è più un iperparametro da provare:
 # lo decide l'early stopping (n_epoche_max + pazienza), stesso approccio del multitask.
 # tuning quindi su units, lr, batch_size
@@ -176,135 +183,129 @@ combinazioni_mlp = [(units, lr, batch_size)
                      for units in [64, 128, 256]
                      for lr in [0.001, 0.0003, 0.0001]
                      for batch_size in [128, 256]]
-combinazioni_scelte_mlp = rng.sample(combinazioni_mlp, 10)
 
 train_dataset = TensorDataset(X_train_tensor, Y_train_tensor)
 X_val_device = X_val_tensor.to(device)
 
-best_auroc_mlp = 0.0
-best_params_mlp = {}
-migliori_pesi_mlp = None
+seeds = [42, 123, 7, 2024, 99]
+risultati_multi_run = {"AUROC": [], "AUPRC": [], "Accuracy": [], "Precision": [], "Recall": [], "F1 Score": [], "Utilita": []}
 
-for units, lr, batch_size in combinazioni_scelte_mlp:
-    print(f"\n=== Provo units={units}, lr={lr}, batch_size={batch_size} ===")
+for seed_run in seeds:
+    print(f"\n\n--------- SEED {seed_run} ---------")
+    torch.manual_seed(seed_run)
+    rng = random.Random(seed_run)
+    combinazioni_scelte_mlp = rng.sample(combinazioni_mlp, 10)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    best_auroc_mlp = 0.0
+    best_params_mlp = {}
+    migliori_pesi_mlp = None
 
-    mlp_temp = SepsisMLP(n_features=len(feature_cols), units=units).to(device)
-    optimizer = torch.optim.Adam(mlp_temp.parameters(), lr=lr)
-    loss_fn = nn.BCELoss()
+    for units, lr, batch_size in combinazioni_scelte_mlp:
+        print(f"\n=== Provo units={units}, lr={lr}, batch_size={batch_size} ===")
 
-    miglior_auroc_combo = 0.0
-    pazienza = 3
-    epoche_senza_miglioramento = 0
-    pesi_migliori_combo = None
-    n_epoche_max = 30
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    for epoca in range(n_epoche_max):
-        mlp_temp.train()
-        for x_batch, y_batch in train_loader:
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
+        mlp_temp = SepsisMLP(n_features=len(feature_cols), units=units).to(device)
+        optimizer = torch.optim.Adam(mlp_temp.parameters(), lr=lr)
+        loss_fn = nn.BCELoss()
 
-            optimizer.zero_grad()
-            p = mlp_temp(x_batch)
-            loss = loss_fn(p, y_batch)
-            loss.backward()
-            optimizer.step()
+        miglior_auroc_combo = 0.0
+        pazienza = 3
+        epoche_senza_miglioramento = 0
+        pesi_migliori_combo = None
+        n_epoche_max = 30
 
-        mlp_temp.eval()
-        with torch.no_grad():
-            p_val = mlp_temp(X_val_device).cpu().numpy()
-        auroc_val_epoca = roc_auc_score(Y_val, p_val)
+        for epoca in range(n_epoche_max):
+            mlp_temp.train()
+            for x_batch, y_batch in train_loader:
+                x_batch = x_batch.to(device)
+                y_batch = y_batch.to(device)
 
-        if auroc_val_epoca > miglior_auroc_combo:
-            miglior_auroc_combo = auroc_val_epoca
-            epoche_senza_miglioramento = 0
-            pesi_migliori_combo = {k: v.clone() for k, v in mlp_temp.state_dict().items()}
-        else:
-            epoche_senza_miglioramento += 1
+                optimizer.zero_grad()
+                p = mlp_temp(x_batch)
+                loss = loss_fn(p, y_batch)
+                loss.backward()
+                optimizer.step()
 
-        if epoche_senza_miglioramento >= pazienza:
-            break
+            mlp_temp.eval()
+            with torch.no_grad():
+                p_val = mlp_temp(X_val_device).cpu().numpy()
+            auroc_val_epoca = roc_auc_score(Y_val, p_val)
 
-    print(f"Migliore AUROC per questa combinazione: {miglior_auroc_combo:.4f} (fermato all'epoca {epoca+1})")
+            if auroc_val_epoca > miglior_auroc_combo:
+                miglior_auroc_combo = auroc_val_epoca
+                epoche_senza_miglioramento = 0
+                pesi_migliori_combo = {k: v.clone() for k, v in mlp_temp.state_dict().items()}
+            else:
+                epoche_senza_miglioramento += 1
 
-    if miglior_auroc_combo > best_auroc_mlp:
-        best_auroc_mlp = miglior_auroc_combo
-        best_params_mlp = {"units": units, "lr": lr, "batch_size": batch_size}
-        migliori_pesi_mlp = pesi_migliori_combo
+            if epoche_senza_miglioramento >= pazienza:
+                break
 
-print("\nMigliori parametri MLP:", best_params_mlp)
+        print(f"Migliore AUROC per questa combinazione: {miglior_auroc_combo:.4f} (fermato all'epoca {epoca+1})")
 
-# ricostruisco il modello finale con i migliori iperparametri e i pesi migliori trovati
-mlp = SepsisMLP(n_features=len(feature_cols), units=best_params_mlp["units"]).to(device)
-mlp.load_state_dict(migliori_pesi_mlp)
-mlp.eval()
+        if miglior_auroc_combo > best_auroc_mlp:
+            best_auroc_mlp = miglior_auroc_combo
+            best_params_mlp = {"units": units, "lr": lr, "batch_size": batch_size}
+            migliori_pesi_mlp = pesi_migliori_combo
 
-with torch.no_grad():
-    t_train_prob = mlp(X_train_tensor.to(device)).cpu().numpy().flatten()
-t_train = (t_train_prob > 0.5).astype(int)
+    print(f"\nMigliori parametri MLP per seed {seed_run}:", best_params_mlp)
 
-print("\n--- Risultati Train Set (confronto overfitting) ---")
-evaluetion_metrics(Y_train, t_train, t_train_prob)
-punteggi_train = normalizza_punteggio(train_set["hours_to_sepsis"], train_set["is_sepsis"], t_train)
-print("Media utilità clinica MLP Train set:", punteggi_train)
+    mlp = SepsisMLP(n_features=len(feature_cols), units=best_params_mlp["units"]).to(device)
+    mlp.load_state_dict(migliori_pesi_mlp)
+    mlp.eval()
 
-# Predizioni su validation e test 
-with torch.no_grad():
-    t_mlp_prob = mlp(X_val_device).cpu().numpy().flatten()
-    t_test_prob = mlp(X_test_tensor.to(device)).cpu().numpy().flatten()
+    with torch.no_grad():
+        t_test_prob = mlp(X_test_tensor.to(device)).cpu().numpy().flatten()
+    t_test_mlp = (t_test_prob > 0.5).astype(int)
 
-t_mlp = (t_mlp_prob > 0.5).astype(int)
-t_test_mlp = (t_test_prob > 0.5).astype(int)
+    print(f"\n--- Risultati Test Set (seed {seed_run}) ---")
+    metriche = evaluetion_metrics(Y_test, t_test_mlp, t_test_prob)
+    punteggi_mlp_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_test_mlp)
+    print("Media utilità clinica MLP Test set:", punteggi_mlp_test)
 
-# Risultati del Validation Set
-print("\n ---------- Validation Set ----------")
-print("\nMLP: ")
-evaluetion_metrics(Y_val, t_mlp, t_mlp_prob)
-punteggi_mlp = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], t_mlp)
-print("Media utilità clinica MLP:", punteggi_mlp)
+    for chiave in ["AUROC", "AUPRC", "Accuracy", "Precision", "Recall", "F1 Score"]:
+        risultati_multi_run[chiave].append(metriche[chiave])
+    risultati_multi_run["Utilita"].append(punteggi_mlp_test)
 
-print("\n ---------- Test Set ----------")
-print("\nMLP Test Set:")
-evaluetion_metrics(Y_test, t_test_mlp, t_test_prob)
-punteggi_mlp_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_test_mlp)
-print("Media utilità clinica MLP Test set:", punteggi_mlp_test)
+    # DeepExplainer ha bisogno di un campione di dati per stimare il valore atteso come output del modello 
+    background = X_train_tensor[:100].to(device)
 
-# DeepExplainer ha bisogno di un campione di dati per stimare il valore atteso come output del modello 
-background = X_train_tensor[:100].to(device)
-
-# Campiono il test set per SHAP, stessa logica usata per XGBoost 
-np.random.seed(42)
-indici_campione = np.random.choice(X_test_tensor.shape[0], size=2000, replace=False)
-X_test_sample = X_test_tensor[indici_campione].to(device)
+    # Campiono il test set per SHAP, stessa logica usata per XGBoost 
+    np.random.seed(42)
+    indici_campione = np.random.choice(X_test_tensor.shape[0], size=2000, replace=False)
+    X_test_sample = X_test_tensor[indici_campione].to(device)
 
 
-# Creo l'istanza vera e propria del modello "senza sigmoid", riusando i pesi di mlp
-mlp_logit = SepsisMLPLogit(mlp).to(device)
-mlp_logit.eval()
+    # Creo l'istanza vera e propria del modello "senza sigmoid", riusando i pesi di mlp
+    mlp_logit = SepsisMLPLogit(mlp).to(device)
+    mlp_logit.eval()
 
-# Stima gli SHAP confrontando l'output sui dati reali con quelli sul background 
-explainer = shap.DeepExplainer(mlp_logit, background)
+    # Stima gli SHAP confrontando l'output sui dati reali con quelli sul background 
+    explainer = shap.DeepExplainer(mlp_logit, background)
 
-# Calcolo i valori di SHAP sul campione di test
-shap_values = explainer.shap_values(X_test_sample)
-shap_values = shap_values[:, :, 0]
+    # Calcolo i valori di SHAP sul campione di test
+    shap_values = explainer.shap_values(X_test_sample)
+    shap_values = shap_values[:, :, 0]
 
-# Siccome il tensor lavora sulla GPU mentre SHAP e matplot lavorano sulla cpu
-X_test_sample_np = X_test_sample.cpu().numpy()
-X_test_sample_df = pd.DataFrame(X_test_sample_np, columns=feature_cols)
+    # Siccome il tensor lavora sulla GPU mentre SHAP e matplot lavorano sulla cpu
+    X_test_sample_np = X_test_sample.cpu().numpy()
+    X_test_sample_df = pd.DataFrame(X_test_sample_np, columns=feature_cols)
 
+    # Primo grafico importanza media delle feature
+    shap.summary_plot(shap_values, X_test_sample_df, plot_type="bar", show=False)
+    plt.tight_layout()
+    plt.savefig(f"MLP_Plot_feature_{seed_run}.png", dpi=150)
+    plt.close()
 
+    # Secondo grafico beeswarm con direzione dell'effetto
+    shap.summary_plot(shap_values, X_test_sample_df, show=False)
+    plt.tight_layout()
+    plt.savefig(f"MLP_Plot_completo_{seed_run}.png", dpi=150)
+    plt.close()
 
-# Primo grafico importanza media delle feature
-shap.summary_plot(shap_values, X_test_sample_df, plot_type="bar", show=False)
-plt.tight_layout()
-plt.savefig("MLP_Plot_feature.png", dpi=150)
-plt.close()
-
-# Secondo grafico beeswarm con direzione dell'effetto
-shap.summary_plot(shap_values, X_test_sample_df, show=False)
-plt.tight_layout()
-plt.savefig("MLP_Plot_completo.png", dpi=150)
-plt.close()
+print(f"\n\n========== RISULTATI FINALI MLP: MEDIA +/- DEV. STANDARD SU {len(seeds)} SEED ==========")
+for chiave, valori in risultati_multi_run.items():
+    media = np.mean(valori)
+    std = np.std(valori)
+    print(f"{chiave}: {media:.4f} +/- {std:.4f}")

@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score
 from xgboost import XGBClassifier
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import RandomizedSearchCV
 import shap
 import matplotlib.pyplot as plt
 
@@ -56,6 +56,15 @@ def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
             else:
                 return -2    
 
+# Il vero punteggio ottimale per riga è il massimo tra predire 1 e predire 0, non sempre 1
+# predire sempre 1 è subottimale sulle righe non settiche e su quelle troppo lontane dall'onset,
+# dove predire 0 costa 0 invece di -0.05 altrimente gonfiava l'utilità normalizzata
+def punteggio_ottimale(hours_to_sepsis, is_sepsis):
+    return max(
+        calcola_punteggio(hours_to_sepsis, 1, is_sepsis),
+        calcola_punteggio(hours_to_sepsis, 0, is_sepsis)
+    )
+
 #Sto normalizzando i punteggicome nel paper
 def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
    #è il punteggio reale del modello con le sue predizioni
@@ -65,7 +74,7 @@ def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
    U_no_predictions=sum([calcola_punteggio(ore, 0, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
 
    #questo è il punteggio se il modello predice sempre sepsi (cioè il massimo che posso avere)
-   U_optimal=sum([calcola_punteggio(ore,1,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
+   U_optimal=sum([punteggio_ottimale(ore,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
 
    #qua sto facendo la normalizzazione cioè quanto si avvicina il modello al punteggio ottimale(optimal), partendo dal base(no_prediction) e il punteggio sarà tra 0 e 1
    return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
@@ -116,7 +125,9 @@ feature_cols = X_train.columns.tolist()
 param_grid_xgb = {
     "n_estimators": [100, 200, 300], #quanti alberi costruisce
     "max_depth": [3, 5, 7], #quanto profondi possono essere gli alberi
-    "learning_rate": [0.01, 0.1, 0.3]   #quanto veloce impara
+    "learning_rate": [0.01, 0.1, 0.3] ,  #quanto veloce impara
+    "subsample": [0.7, 0.8, 1.0], #righe campionate per ogni albero
+    "colsample_bytree": [0.7, 0.8, 1.0] #feature campionate per ogni albero
 }
 
 #Gestisco i -1 e i NaN con forward fill per paziente,evito di mescolare dati tra pazienti diversi
@@ -128,6 +139,7 @@ X_test_ffill = test_set.groupby("subject_id")[feature_cols].apply(lambda x: x.re
 #unisco train e validation per passarli al GridSearch
 X_train_val = pd.DataFrame(np.concatenate([X_train_ffill, X_val_ffill]), columns=feature_cols)
 X_val_ffill_df = pd.DataFrame(X_val_ffill, columns=feature_cols)
+X_test_ffill_df = pd.DataFrame(X_test_ffill, columns=feature_cols) 
 Y_train_val = pd.concat([Y_train, Y_val]).reset_index(drop=True)
 
 #Definisco gli indici per dire al GridSearch quali righe sono train e quali val
@@ -135,64 +147,52 @@ n_train = len(X_train_ffill)
 n_val = len(X_val_ffill)
 split = [(list(range(n_train)), list(range(n_train, n_train + n_val)))]
 
-#Provo tutte le combinazioni della griglia e valuto sul validation set con AUROC,l'early stopping ferma il training se la performance non migliora per 10 round consecutivi
-grid_xgb = GridSearchCV(
-    XGBClassifier(early_stopping_rounds=10, eval_metric="auc"),
-    param_grid_xgb, cv=split, scoring="roc_auc", n_jobs=1,
-    error_score=0
-)
-grid_xgb.fit(X_train_val, Y_train_val, eval_set=[(X_val_ffill_df, Y_val)],verbose=False)
+#Faccio ripetere il tuning, valutazione e SHAP su piu seed
+seeds = [42, 123, 7, 2024, 99]
+risultati_multi_run = {"AUROC": [], "AUPRC": [], "Accuracy": [], "Precision": [], "Recall": [], "F1 Score": [], "Utilita": []}
 
-#Prendo il modello con i migliori parametri trovati
-model = grid_xgb.best_estimator_
-pred_xgb = model.predict(pd.DataFrame(X_val_ffill, columns=feature_cols)).flatten()
-t_test_xgb = model.predict(pd.DataFrame(X_test_ffill, columns=feature_cols)).flatten()
-print("Migliori parametri XGBoost:", grid_xgb.best_params_)
+for seed_run in seeds:
+    print(f"\n\n--------- SEED {seed_run} ---------")
 
-#Risultati del Validation Set
-print("\n ---------- Validation Set ----------")
-print("\nXGBOOST: ")
-#Calcolo la probabilità per AUROC e AUPRC
-t_xgb_prob = model.predict_proba(pd.DataFrame(X_val_ffill, columns=feature_cols))[:, 1]
-evaluetion_metrics(Y_val,pred_xgb,t_xgb_prob)
-#Calcolo l'utilità clinica normalizzata, passo le ore mancanti alla sepsi, se il paziente è settico e le predizioni del modello t sono le predizioni di XGBoost
-punteggi_xgb = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], pred_xgb)
-print("Utilita' clinica normalizzata XGBoost:", punteggi_xgb)
+    grid_xgb = RandomizedSearchCV(
+        XGBClassifier(early_stopping_rounds=10, eval_metric="auc", random_state=seed_run),
+        param_grid_xgb, n_iter=10, cv=split, scoring="roc_auc", n_jobs=1,
+        error_score=0, random_state=seed_run
+    )
+    grid_xgb.fit(X_train_val, Y_train_val, eval_set=[(X_val_ffill_df, Y_val)], verbose=False)
 
-print("\n ---------- Test Set ----------")
-#Risultati del Test Set
-print("\nXGBOOST Test Set: ")
-t_xgb_test_prob = model.predict_proba(pd.DataFrame(X_test_ffill, columns=feature_cols))[:, 1]
-evaluetion_metrics(Y_test, t_test_xgb, t_xgb_test_prob)
-punteggi_xgb_test=normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"],t_test_xgb)
-print("Media utilita' clinica XGBoost Test set:", punteggi_xgb_test)
+    model = grid_xgb.best_estimator_
+    print(f"Migliori parametri XGBoost seed {seed_run}:", grid_xgb.best_params_)
 
-# Implementazione della Explainable AI Shap per XGBoost
-# TreeExplainer è ottimizzato per l'uso su modelli ad alberi (XGBoost,ecc)
-# Calcola i valori di SHAP usando la struttura degli alberi
-explainer = shap.TreeExplainer(model) 
+    t_test_xgb = model.predict(X_test_ffill_df).flatten()
+    t_xgb_test_prob = model.predict_proba(X_test_ffill_df)[:, 1]
 
-# Campiono il test set perchè altrimenti calcolare lo SHAP su tutti i dati sarebbe troppo lento
-X_test_sample = pd.DataFrame(X_test_ffill,columns=feature_cols).sample(n=2000,random_state=42)
+    print(f"\n--- Risultati Test Set (seed {seed_run}) ---")
+    metriche = evaluetion_metrics(Y_test, t_test_xgb, t_xgb_test_prob)
+    punteggi_xgb_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_test_xgb)
+    print("Media utilita' clinica XGBoost Test set:", punteggi_xgb_test)
 
-# Calcolo i valori di SHAP che è una matrice (righe,feature)
-shap_values = explainer.shap_values(X_test_sample)
+    for chiave in ["AUROC", "AUPRC", "Accuracy", "Precision", "Recall", "F1 Score"]:
+        risultati_multi_run[chiave].append(metriche[chiave])
+    risultati_multi_run["Utilita"].append(punteggi_xgb_test)
 
-# Primo Grafico mostra su tutto il campione quanto ogni feature influenza la predizione
-# Una feature può essere importante sia in positivo che in negativo
-shap.summary_plot(shap_values, X_test_sample, plot_type="bar", show=False)
-plt.tight_layout()
-plt.savefig("XGB_Plot_feature.png",dpi=150)
-plt.close
+    explainer = shap.TreeExplainer(model)
+    X_test_sample = X_test_ffill_df.sample(n=2000, random_state=42)
+    shap_values = explainer.shap_values(X_test_sample)
 
-# Il secondo grafico è il Plot completo è come quello sopra solo che qui mostra anceh la direzione
-# (rosso val. feature alto, blue val. feature basso)e la distribuzione dei valori SHAP per ogni feature
-shap.summary_plot(shap_values,X_test_sample,show=False)
-plt.tight_layout()
-plt.savefig("XGB_Plot_completo.png",dpi=150)
-plt.close
+    shap.summary_plot(shap_values, X_test_sample, plot_type="bar", show=False)
+    plt.tight_layout()
+    plt.savefig(f"XGB_Plot_feature_{seed_run}.png", dpi=150)
+    plt.close()
 
-# Dependence plot su Age, guardo come varia lo SHAP value al variare dell'età
-shap.dependence_plot("Age", shap_values, X_test_sample, show=False)
-plt.savefig("XGB_Dependence_Age.png", bbox_inches="tight", dpi=150)
-plt.close()
+    shap.summary_plot(shap_values, X_test_sample, show=False)
+    plt.tight_layout()
+    plt.savefig(f"XGB_Plot_completo_{seed_run}.png", dpi=150)
+    plt.close()
+
+#Qua aggiungo media +/- deviazione standard su tutti i seed
+print(f"\n\n========== RISULTATI FINALI XGBOOST: MEDIA +/- DEV. STANDARD SU {len(seeds)} SEED ==========")
+for chiave, valori in risultati_multi_run.items():
+    media = np.mean(valori)
+    std = np.std(valori)
+    print(f"{chiave}: {media:.4f} +/- {std:.4f}")
