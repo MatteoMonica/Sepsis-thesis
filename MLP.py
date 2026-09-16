@@ -11,9 +11,6 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-torch.manual_seed(42)
-rng = random.Random(42)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 #Confronto y_true(reale) con le y_pred del modello per vedere quanto "bravo" è il modello,y_prob è la probabilità,AUROC e AUPRC le richiedono perchè misurano quanto bene il modello ordina i pazienti dal più al meno rischioso 

@@ -9,9 +9,6 @@ from sklearn.preprocessing import StandardScaler
 import shap
 import matplotlib.pyplot as plt
 
-torch.manual_seed(42)
-rng = random.Random(42)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 #Creo la funzione per crearmi il dataset da dare alla LSTM perchè serve diverso rispetto a quello usato dagli altri modelli
@@ -79,10 +76,16 @@ def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
             else:
                 return -2    
 
+def punteggio_ottimale(hours_to_sepsis, is_sepsis):
+    return max(
+        calcola_punteggio(hours_to_sepsis, 1, is_sepsis),
+        calcola_punteggio(hours_to_sepsis, 0, is_sepsis)
+    )
+
 def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
    U_totale = sum([calcola_punteggio(ore, pred, sepsi) for ore, pred, sepsi in zip(hours_to_sepsis_list, prediction, is_sepsis_list)])
    U_no_predictions=sum([calcola_punteggio(ore, 0, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
-   U_optimal=sum([calcola_punteggio(ore,1,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
+   U_optimal=sum([punteggio_ottimale(ore,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)]) 
    return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
 
 #Leggo il mio file 
@@ -190,150 +193,157 @@ class SepsisLSTM(nn.Module):
         return p
 
 
-# --- Tuning manuale LSTM ---
+# --- Tuning manuale LSTM, ripetuto su più seed per calcolare media e dev. standard ---
 combinazioni_lstm = [(units, lr, batch_size)
                       for units in [64, 128]
                       for lr in [0.001, 0.0003, 0.0001]
                       for batch_size in [128, 256]]
-combinazioni_scelte_lstm = rng.sample(combinazioni_lstm, 10)
 
 train_dataset_seq = TensorDataset(X_train_seq_tensor, Y_train_seq_tensor)
 
-best_auroc_lstm = 0.0
-best_params_lstm = {}
-migliori_pesi_lstm = None
+seeds = [42, 123, 7, 2024, 99]
+risultati_multi_run = {"AUROC": [], "AUPRC": [], "Accuracy": [], "Precision": [], "Recall": [], "F1 Score": [], "Utilita": []}
 
-for units, lr, batch_size in combinazioni_scelte_lstm:
-    print(f"\n=== Provo units={units}, lr={lr}, batch_size={batch_size} ===")
+for seed_run in seeds:
+    print(f"\n\n--------- SEED {seed_run} ---------")
+    torch.manual_seed(seed_run)
+    rng = random.Random(seed_run)
+    combinazioni_scelte_lstm = rng.sample(combinazioni_lstm, 10)
 
-    train_loader_seq = DataLoader(train_dataset_seq, batch_size=batch_size, shuffle=True)
+    best_auroc_lstm = 0.0
+    best_params_lstm = {}
+    migliori_pesi_lstm = None
 
-    lstm_temp = SepsisLSTM(n_features=len(feature_cols), units=units).to(device)
-    optimizer = torch.optim.Adam(lstm_temp.parameters(), lr=lr)
-    loss_fn = nn.BCELoss()
+    for units, lr, batch_size in combinazioni_scelte_lstm:
+        print(f"\n=== Provo units={units}, lr={lr}, batch_size={batch_size} ===")
 
-    miglior_auroc_combo = 0.0
-    pazienza = 3
-    epoche_senza_miglioramento = 0
-    pesi_migliori_combo = None
-    n_epoche_max = 30
+        train_loader_seq = DataLoader(train_dataset_seq, batch_size=batch_size, shuffle=True)
 
-    for epoca in range(n_epoche_max):
-        lstm_temp.train()
-        for x_batch, y_batch in train_loader_seq:
-            x_batch = x_batch.to(device)
-            y_batch = y_batch.to(device)
+        lstm_temp = SepsisLSTM(n_features=len(feature_cols), units=units).to(device)
+        optimizer = torch.optim.Adam(lstm_temp.parameters(), lr=lr)
+        loss_fn = nn.BCELoss()
 
-            optimizer.zero_grad()
-            p = lstm_temp(x_batch)
-            loss = loss_fn(p, y_batch)
-            loss.backward()
-            optimizer.step()
+        miglior_auroc_combo = 0.0
+        pazienza = 3
+        epoche_senza_miglioramento = 0
+        pesi_migliori_combo = None
+        n_epoche_max = 30
 
-        # valutazione a batch, per evitare l'OutOfMemory visto passando tutto il validation insieme
-        p_val = predici_a_batch(lstm_temp, X_val_seq_tensor, batch_size=batch_size)
-        auroc_val_epoca = roc_auc_score(Y_val_seq, p_val)
+        for epoca in range(n_epoche_max):
+            lstm_temp.train()
+            for x_batch, y_batch in train_loader_seq:
+                x_batch = x_batch.to(device)
+                y_batch = y_batch.to(device)
 
-        if auroc_val_epoca > miglior_auroc_combo:
-            miglior_auroc_combo = auroc_val_epoca
-            epoche_senza_miglioramento = 0
-            pesi_migliori_combo = {k: v.clone() for k, v in lstm_temp.state_dict().items()}
-        else:
-            epoche_senza_miglioramento += 1
+                optimizer.zero_grad()
+                p = lstm_temp(x_batch)
+                loss = loss_fn(p, y_batch)
+                loss.backward()
+                optimizer.step()
 
-        if epoche_senza_miglioramento >= pazienza:
-            break
+            # valutazione a batch, per evitare l'OutOfMemory visto passando tutto il validation insieme
+            p_val = predici_a_batch(lstm_temp, X_val_seq_tensor, batch_size=batch_size)
+            auroc_val_epoca = roc_auc_score(Y_val_seq, p_val)
 
-    print(f"Migliore AUROC per questa combinazione: {miglior_auroc_combo:.4f} (fermato all'epoca {epoca+1})")
+            if auroc_val_epoca > miglior_auroc_combo:
+                miglior_auroc_combo = auroc_val_epoca
+                epoche_senza_miglioramento = 0
+                pesi_migliori_combo = {k: v.clone() for k, v in lstm_temp.state_dict().items()}
+            else:
+                epoche_senza_miglioramento += 1
 
-    if miglior_auroc_combo > best_auroc_lstm:
-        best_auroc_lstm = miglior_auroc_combo
-        best_params_lstm = {"units": units, "lr": lr, "batch_size": batch_size}
-        migliori_pesi_lstm = pesi_migliori_combo
+            if epoche_senza_miglioramento >= pazienza:
+                break
 
-print("\nMigliori parametri LSTM:", best_params_lstm)
+        print(f"Migliore AUROC per questa combinazione: {miglior_auroc_combo:.4f} (fermato all'epoca {epoca+1})")
 
-lstm = SepsisLSTM(n_features=len(feature_cols), units=best_params_lstm["units"]).to(device)
-lstm.load_state_dict(migliori_pesi_lstm)
-lstm.eval()
+        if miglior_auroc_combo > best_auroc_lstm:
+            best_auroc_lstm = miglior_auroc_combo
+            best_params_lstm = {"units": units, "lr": lr, "batch_size": batch_size}
+            migliori_pesi_lstm = pesi_migliori_combo
 
-# predizioni finali, anche queste a batch per lo stesso motivo
-t_lstm_prob = predici_a_batch(lstm, X_val_seq_tensor).flatten()
-t_test_prob = predici_a_batch(lstm, X_test_seq_tensor).flatten()
+    print(f"\nMigliori parametri LSTM per seed {seed_run}:", best_params_lstm)
 
-t_lstm = (t_lstm_prob > 0.5).astype(int)
-t_test_lstm = (t_test_prob > 0.5).astype(int)
+    lstm = SepsisLSTM(n_features=len(feature_cols), units=best_params_lstm["units"]).to(device)
+    lstm.load_state_dict(migliori_pesi_lstm)
+    lstm.eval()
 
-#Risultati del Validation Set
-print("\n ---------- Validation Set ----------")
-print("\nLSTM: ")
-evaluetion_metrics(Y_val_seq, t_lstm, t_lstm_prob)
-# NB: per l'utilità clinica uso validation_set (non val_scaled_df), che ha hours_to_sepsis/is_sepsis;
-# crea_sequenze produce una riga per ogni (subject_id, hour_index) nello stesso ordine di validation_set
-punteggi_lstm = normalizza_punteggio(validation_set["hours_to_sepsis"], validation_set["is_sepsis"], t_lstm)
-print("Media utilità clinica LSTM:", punteggi_lstm)
+    # predizioni finali sul test set, a batch per lo stesso motivo di prima
+    t_test_prob = predici_a_batch(lstm, X_test_seq_tensor).flatten()
+    t_test_lstm = (t_test_prob > 0.5).astype(int)
 
-print("\n ---------- Test Set ----------")
-print("\nLSTM Test Set:")
-evaluetion_metrics(Y_test_seq, t_test_lstm, t_test_prob)
-punteggi_lstm_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_test_lstm)
-print("Media utilità clinica LSTM Test set:", punteggi_lstm_test)
+    print(f"\n--- Risultati Test Set (seed {seed_run}) ---")
+    metriche = evaluetion_metrics(Y_test_seq, t_test_lstm, t_test_prob)
 
-import shap
-import matplotlib.pyplot as plt
+    # NB: per l'utilità clinica uso test_set 
+    # crea_sequenze produce una riga per ogni (subject_id, hour_index) nello stesso ordine di test_set
+    punteggi_lstm_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_test_lstm)
+    print("Media utilità clinica LSTM Test set:", punteggi_lstm_test)
 
-# sposto il modello su CPU, alcune versioni di SHAP hanno problemi di compatibilità
-# con operazioni LSTM su GPU
-lstm_cpu = lstm.to("cpu")
-lstm_cpu.eval()
+    for chiave in ["AUROC", "AUPRC", "Accuracy", "Precision", "Recall", "F1 Score"]:
+        risultati_multi_run[chiave].append(metriche[chiave])
+    risultati_multi_run["Utilita"].append(punteggi_lstm_test)
 
-# punto di riferimento per calcolare quanto ogni feature si scosta dalla norma
-background = X_train_seq_tensor[:100].to("cpu")
+    # sposto il modello su CPU, alcune versioni di SHAP hanno problemi di compatibilità
+    # con operazioni LSTM su GPU
+    lstm_cpu = lstm.to("cpu")
+    lstm_cpu.eval()
 
-# campiono il test set, con le sequenze, GradientExplainer è più lento di
-# TreeExplainer, quindi uso un campione più piccolo 
-rng_shap = np.random.RandomState(42)
-test_sample_idx = rng_shap.choice(len(X_test_seq_tensor), size=200, replace=False)
-test_sample = X_test_seq_tensor[test_sample_idx].to("cpu")
+    # punto di riferimento per calcolare quanto ogni feature si scosta dalla norma
+    # campionato casualmente ,
+    # con random_state fisso a 42 (non seed_run), tutti i seed sullo
+    # stesso identico background, così le differenze tra i plot dipendono solo dal modello
+    idx_bg = np.random.RandomState(42).choice(X_train_seq_tensor.shape[0], size=100, replace=False)
+    background = X_train_seq_tensor[idx_bg].to("cpu")
 
-explainer = shap.GradientExplainer(lstm_cpu, background)
-shap_values = explainer.shap_values(test_sample)
+    # campiono il test set, con le sequenze, GradientExplainer è più lento di
+    # TreeExplainer, quindi uso un campione più piccolo 
+    rng_shap = np.random.RandomState(42)
+    test_sample_idx = rng_shap.choice(len(X_test_seq_tensor), size=200, replace=False)
+    test_sample = X_test_seq_tensor[test_sample_idx].to("cpu")
 
-# shap_values ha forma (200, 24, 34), un valore per ogni (esempio, ora, feature).
-# Se viene restituito come lista (un elemento per output del modello), prendo il primo
-if isinstance(shap_values, list):
-    shap_values = shap_values[0]
-shap_values = np.array(shap_values).reshape(200, 24, len(feature_cols))
+    explainer = shap.GradientExplainer(lstm_cpu, background)
+    shap_values = explainer.shap_values(test_sample)
 
-# Aggregazione 1: importanza per FEATURE, sommando il valore assoluto su tutte le 24 ore
-# così ottengo un singolo numero per, confrontabile con il caso XGBoost
-importanza_per_feature = np.abs(shap_values).sum(axis=1)  
-importanza_media = importanza_per_feature.mean(axis=0)     
+    # shap_values ha forma (200, 24, 34), un valore per ogni (esempio, ora, feature).
+    # Se viene restituito come lista (un elemento per output del modello), prendo il primo
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+    shap_values = np.array(shap_values).reshape(200, 24, len(feature_cols))
 
-# ordino le feature dalla più alla meno importante
-ordine = np.argsort(importanza_media)[::-1]
-feature_ordinate = [feature_cols[i] for i in ordine]
-valori_ordinati = importanza_media[ordine]
+    # Aggregazione 1: importanza per FEATURE, sommando il valore assoluto su tutte le 24 ore
+    # così ottengo un singolo numero per, confrontabile con il caso XGBoost
+    importanza_per_feature = np.abs(shap_values).sum(axis=1)  
+    importanza_media = importanza_per_feature.mean(axis=0)     
 
-plt.figure(figsize=(8, 10))
-plt.barh(feature_ordinate[:20][::-1], valori_ordinati[:20][::-1])
-plt.xlabel("Importanza media (|valore SHAP| sommato sulle 24 ore)")
-plt.title("LSTM - Importanza globale delle feature (top 20)")
-plt.tight_layout()
-plt.savefig("LSTM_Plot_globale.png", dpi=150)
-plt.close()
+    # ordino le feature dalla più alla meno importante
+    ordine = np.argsort(importanza_media)[::-1]
+    feature_ordinate = [feature_cols[i] for i in ordine]
+    valori_ordinati = importanza_media[ordine]
 
-# Aggregazione 2: importanza per ORA, per vedere se le ore più recenti
-# contano di più di quelle più lontane nel tempo (plausibile clinicamente) 
-importanza_per_ora = np.abs(shap_values).mean(axis=(0, 2))  
+    plt.figure(figsize=(8, 10))
+    plt.barh(feature_ordinate[:20][::-1], valori_ordinati[:20][::-1])
+    plt.xlabel("Importanza media (|valore SHAP| sommato sulle 24 ore)")
+    plt.title(f"LSTM - Importanza globale delle feature (top 20, seed {seed_run})")
+    plt.tight_layout()
+    plt.savefig(f"LSTM_Plot_globale_{seed_run}.png", dpi=150)
+    plt.close()
 
-plt.figure(figsize=(8, 4))
-plt.plot(range(1, 25), importanza_per_ora, marker="o")
-plt.xlabel("Ora nella sequenza (24 = ora più recente)")
-plt.ylabel("Importanza media |SHAP|")
-plt.title("LSTM - Importanza media per ora della sequenza")
-plt.tight_layout()
-plt.savefig("LSTM_Plot_temporale.png", dpi=150)
-plt.close()
+    # Aggregazione 2: importanza per ORA, per vedere se le ore più recenti
+    # contano di più di quelle più lontane nel tempo (plausibile clinicamente) 
+    importanza_per_ora = np.abs(shap_values).mean(axis=(0, 2))  
 
-print("\nGrafici SHAP LSTM salvati: shap_lstm_importanza_globale.png, shap_lstm_importanza_temporale.png")
+    plt.figure(figsize=(8, 4))
+    plt.plot(range(1, 25), importanza_per_ora, marker="o")
+    plt.xlabel("Ora nella sequenza (24 = ora più recente)")
+    plt.ylabel("Importanza media |SHAP|")
+    plt.title(f"LSTM - Importanza media per ora della sequenza (seed {seed_run})")
+    plt.tight_layout()
+    plt.savefig(f"LSTM_Plot_temporale_{seed_run}.png", dpi=150)
+    plt.close()
+
+print(f"\n\n========== RISULTATI FINALI LSTM: MEDIA +/- DEV. STANDARD SU {len(seeds)} SEED ==========")
+for chiave, valori in risultati_multi_run.items():
+    media = np.mean(valori)
+    std = np.std(valori)
+    print(f"{chiave}: {media:.4f} +/- {std:.4f}")
