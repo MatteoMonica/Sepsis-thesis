@@ -9,9 +9,6 @@ import random
 import shap
 import matplotlib.pyplot as plt
 
-torch.manual_seed(42)
-rng = random.Random(42)
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 #Sto calcolando i punteggi da dare come nel paper (PhysioNet)
@@ -45,10 +42,16 @@ def calcola_punteggio(hours_to_sepsis,prediction,is_sepsis):
             else:
                 return -2    
 
+def punteggio_ottimale(hours_to_sepsis, is_sepsis):
+    return max(
+        calcola_punteggio(hours_to_sepsis, 1, is_sepsis),
+        calcola_punteggio(hours_to_sepsis, 0, is_sepsis)
+    )
+
 def normalizza_punteggio(hours_to_sepsis_list,is_sepsis_list,prediction):
    U_totale = sum([calcola_punteggio(ore, pred, sepsi) for ore, pred, sepsi in zip(hours_to_sepsis_list, prediction, is_sepsis_list)])
    U_no_predictions=sum([calcola_punteggio(ore, 0, sepsi) for ore, sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
-   U_optimal=sum([calcola_punteggio(ore,1,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
+   U_optimal=sum([punteggio_ottimale(ore,sepsi) for ore,sepsi in zip(hours_to_sepsis_list, is_sepsis_list)])
    return (U_totale - U_no_predictions) / (U_optimal - U_no_predictions)
 
 # Leggo il CSV e ricostruisco le colonne temporali
@@ -126,7 +129,7 @@ print("Numero feature:", len(feature_cols))
 print("Shape X_train_tensor:", X_train_tensor.shape)
 
 
-# CASCADE: a differenza del Parallelo, sepsis_head riceve in input non solo z,
+# cascade a differenza del Parallelo, sepsis_head riceve in input non solo z,
 # ma anche le probabilità p_inf, p_org e il loro prodotto (z + 3 valori extra).
 # Come da formula: p_s = SepsisHead(z, p_i, p_o, p_i*p_o)
 # InfectionHead e OrganHead restano invece indipendenti tra loro, ricevono solo z
@@ -161,209 +164,193 @@ class SepsisMultitaskCascade(nn.Module):
         return p_sepsis, p_inf, p_org
 
 
-# Ricerca iperparametri (dim_z, lr, batch_size) con early stopping 
+# Ricerca iperparametri (dim_z, lr, batch_size), ripetuta su più seed per media±std
 combinazioni_multitask = [(dim_z, lr, batch_size)
                            for dim_z in [32, 64, 128]
                            for lr in [0.001, 0.0003, 0.0001]
                            for batch_size in [128, 256, 512]]
-combinazioni_scelte_multitask = rng.sample(combinazioni_multitask, 8)
 
 train_dataset = TensorDataset(X_train_tensor, Y_train_sepsi_tensor, Y_train_inf_tensor, Y_train_org_tensor)
 X_val_device = X_val_tensor.to(device)
 
-miglior_auroc_globale = 0.0
-migliori_iperparametri = None
-migliori_pesi = None
+seeds = [42, 123, 7, 2024, 99]
+risultati_multi_run = {
+    "AUROC": [], "AUROC_infezione": [], "AUROC_organo": [],
+    "AUPRC": [], "Accuracy": [], "Precision": [], "Recall": [], "F1 Score": [], "Utilita": []
+}
 
-for dim_z, lr, batch_size in combinazioni_scelte_multitask:
-    print(f"\n=== Provo dim_z={dim_z}, lr={lr}, batch_size={batch_size} ===")
+for seed_run in seeds:
+    print(f"\n\n--------- SEED {seed_run} ---------")
+    torch.manual_seed(seed_run)
+    rng = random.Random(seed_run)
+    combinazioni_scelte_multitask = rng.sample(combinazioni_multitask, 8)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    miglior_auroc_globale = 0.0
+    migliori_iperparametri = None
+    migliori_pesi = None
 
-    model_temp = SepsisMultitaskCascade(n_features=len(feature_cols), dim_z=dim_z).to(device)
-    optimizer = torch.optim.Adam(model_temp.parameters(), lr=lr)
-    loss_fn = nn.BCELoss()
+    for dim_z, lr, batch_size in combinazioni_scelte_multitask:
+        print(f"\n=== Provo dim_z={dim_z}, lr={lr}, batch_size={batch_size} ===")
 
-    miglior_auroc_val_combo = 0.0
-    pazienza = 3
-    epoche_senza_miglioramento = 0
-    pesi_migliori_combo = None
-    n_epoche_max = 30
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    for epoca in range(n_epoche_max):
-        model_temp.train()
-        for x_batch, y_sepsi_batch, y_inf_batch, y_org_batch in train_loader:
-            x_batch = x_batch.to(device)
-            y_sepsi_batch = y_sepsi_batch.to(device)
-            y_inf_batch = y_inf_batch.to(device)
-            y_org_batch = y_org_batch.to(device)
+        model_temp = SepsisMultitaskCascade(n_features=len(feature_cols), dim_z=dim_z).to(device)
+        optimizer = torch.optim.Adam(model_temp.parameters(), lr=lr)
+        loss_fn = nn.BCELoss()
 
-            optimizer.zero_grad()
-            p_sepsis, p_inf, p_org = model_temp(x_batch)
+        miglior_auroc_val_combo = 0.0
+        pazienza = 3
+        epoche_senza_miglioramento = 0
+        pesi_migliori_combo = None
+        n_epoche_max = 30
 
-            loss_sepsis = loss_fn(p_sepsis, y_sepsi_batch)
-            loss_inf = loss_fn(p_inf, y_inf_batch)
-            loss_org = loss_fn(p_org, y_org_batch)
-            loss = loss_sepsis + 0.5 * loss_inf + 0.5 * loss_org
+        for epoca in range(n_epoche_max):
+            model_temp.train()
+            for x_batch, y_sepsi_batch, y_inf_batch, y_org_batch in train_loader:
+                x_batch = x_batch.to(device)
+                y_sepsi_batch = y_sepsi_batch.to(device)
+                y_inf_batch = y_inf_batch.to(device)
+                y_org_batch = y_org_batch.to(device)
 
-            loss.backward()
-            optimizer.step()
+                optimizer.zero_grad()
+                p_sepsis, p_inf, p_org = model_temp(x_batch)
 
-        model_temp.eval()
-        with torch.no_grad():
-            p_sepsis_val, _, _ = model_temp(X_val_device)
-            p_sepsis_val = p_sepsis_val.cpu().numpy()
-        auroc_val_epoca = roc_auc_score(Y_val_sepsi, p_sepsis_val)
+                loss_sepsis = loss_fn(p_sepsis, y_sepsi_batch)
+                loss_inf = loss_fn(p_inf, y_inf_batch)
+                loss_org = loss_fn(p_org, y_org_batch)
+                loss = loss_sepsis + 0.5 * loss_inf + 0.5 * loss_org
 
-        if auroc_val_epoca > miglior_auroc_val_combo:
-            miglior_auroc_val_combo = auroc_val_epoca
-            epoche_senza_miglioramento = 0
-            pesi_migliori_combo = {k: v.clone() for k, v in model_temp.state_dict().items()}
-        else:
-            epoche_senza_miglioramento += 1
+                loss.backward()
+                optimizer.step()
 
-        if epoche_senza_miglioramento >= pazienza:
-            break
+            model_temp.eval()
+            with torch.no_grad():
+                p_sepsis_val, _, _ = model_temp(X_val_device)
+                p_sepsis_val = p_sepsis_val.cpu().numpy()
+            auroc_val_epoca = roc_auc_score(Y_val_sepsi, p_sepsis_val)
 
-    print(f"Migliore AUROC sepsi per questa combinazione: {miglior_auroc_val_combo:.4f} (fermato all'epoca {epoca+1})")
+            if auroc_val_epoca > miglior_auroc_val_combo:
+                miglior_auroc_val_combo = auroc_val_epoca
+                epoche_senza_miglioramento = 0
+                pesi_migliori_combo = {k: v.clone() for k, v in model_temp.state_dict().items()}
+            else:
+                epoche_senza_miglioramento += 1
 
-    if miglior_auroc_val_combo > miglior_auroc_globale:
-        miglior_auroc_globale = miglior_auroc_val_combo
-        migliori_iperparametri = (dim_z, lr, batch_size)
-        migliori_pesi = pesi_migliori_combo
+            if epoche_senza_miglioramento >= pazienza:
+                break
 
-print("\n=== RISULTATO FINALE RICERCA IPERPARAMETRI ===")
-print("Migliori iperparametri (dim_z, lr, batch_size):", migliori_iperparametri)
-print("Miglior AUROC sepsi validation:", miglior_auroc_globale)
+        print(f"Migliore AUROC sepsi per questa combinazione: {miglior_auroc_val_combo:.4f} (fermato all'epoca {epoca+1})")
 
-dim_z_finale, lr_finale, batch_size_finale = migliori_iperparametri
-model = SepsisMultitaskCascade(n_features=len(feature_cols), dim_z=dim_z_finale).to(device)
-model.load_state_dict(migliori_pesi)
-model.eval()
+        if miglior_auroc_val_combo > miglior_auroc_globale:
+            miglior_auroc_globale = miglior_auroc_val_combo
+            migliori_iperparametri = (dim_z, lr, batch_size)
+            migliori_pesi = pesi_migliori_combo
 
-with torch.no_grad():
-    p_sepsis_val, p_inf_val, p_org_val = model(X_val_device)
-    p_sepsis_val = p_sepsis_val.cpu().numpy()
-    p_inf_val = p_inf_val.cpu().numpy()
-    p_org_val = p_org_val.cpu().numpy()
+    print(f"\nMigliori iperparametri per seed {seed_run} (dim_z, lr, batch_size):", migliori_iperparametri)
+    print("Miglior AUROC sepsi validation:", miglior_auroc_globale)
 
-auroc_sepsis = roc_auc_score(Y_val_sepsi, p_sepsis_val)
-auroc_inf = roc_auc_score(Y_val_inf, p_inf_val)
-auroc_org = roc_auc_score(Y_val_org, p_org_val)
+    dim_z_finale, lr_finale, batch_size_finale = migliori_iperparametri
+    model = SepsisMultitaskCascade(n_features=len(feature_cols), dim_z=dim_z_finale).to(device)
+    model.load_state_dict(migliori_pesi)
+    model.eval()
 
-with torch.no_grad():
-    X_train_device = X_train_tensor.to(device)
-    p_sepsis_train, p_inf_train, p_org_train = model(X_train_device)
-    p_sepsis_train = p_sepsis_train.cpu().numpy()
-    p_inf_train = p_inf_train.cpu().numpy()
-    p_org_train = p_org_train.cpu().numpy()
+    # Valutazione finale sul TEST SET
+    with torch.no_grad():
+        X_test_device = X_test_tensor.to(device)
+        p_sepsis_test, p_inf_test, p_org_test = model(X_test_device)
 
-auroc_sepsis_train = roc_auc_score(Y_train_sepsi, p_sepsis_train)
-auroc_inf_train = roc_auc_score(Y_train_inf, p_inf_train)
-auroc_org_train = roc_auc_score(Y_train_org, p_org_train)
+        p_sepsis_test = p_sepsis_test.cpu().numpy()
+        p_inf_test = p_inf_test.cpu().numpy()
+        p_org_test = p_org_test.cpu().numpy()
 
-# Valutazione finale sul TEST SET 
-model.eval()
-with torch.no_grad():
-    X_test_device = X_test_tensor.to(device)
-    p_sepsis_test, p_inf_test, p_org_test = model(X_test_device)
-    p_sepsis_test = p_sepsis_test.cpu().numpy()
-    p_inf_test = p_inf_test.cpu().numpy()
-    p_org_test = p_org_test.cpu().numpy()
+    auroc_sepsis_test = roc_auc_score(Y_test_sepsi, p_sepsis_test)
+    auroc_inf_test = roc_auc_score(Y_test_inf, p_inf_test)
+    auroc_org_test = roc_auc_score(Y_test_org, p_org_test)
+    auprc_test = average_precision_score(Y_test_sepsi, p_sepsis_test)
 
-auroc_sepsis_test = roc_auc_score(Y_test_sepsi, p_sepsis_test)
-auroc_inf_test = roc_auc_score(Y_test_inf, p_inf_test)
-auroc_org_test = roc_auc_score(Y_test_org, p_org_test)
+    t_sepsis_test = (p_sepsis_test > 0.5).astype(int)
+    accuracy_test = accuracy_score(Y_test_sepsi, t_sepsis_test)
+    precision_test = precision_score(Y_test_sepsi, t_sepsis_test)
+    recall_test = recall_score(Y_test_sepsi, t_sepsis_test)
+    f1_test = f1_score(Y_test_sepsi, t_sepsis_test)
 
-# calcolo le predizioni binarie (soglia 0.5), servono sia per le metriche sotto sia per l'utilità clinica
-t_sepsis_val = (p_sepsis_val > 0.5).astype(int)
-t_sepsis_test = (p_sepsis_test > 0.5).astype(int)
+    print(f"\n--- Risultati Test Set (seed {seed_run}) ---")
+    print("AUROC sepsi:", auroc_sepsis_test)
+    print("AUROC infezione:", auroc_inf_test)
+    print("AUROC organo:", auroc_org_test)
+    print("AUPRC sepsi:", auprc_test)
+    print("Accuracy sepsi:", accuracy_test)
+    print("Precision sepsi:", precision_test)
+    print("Recall sepsi:", recall_test)
+    print("F1 Score sepsi:", f1_test)
 
-# metriche complete sul task sepsi (validation e test)
-accuracy_val = accuracy_score(Y_val_sepsi, t_sepsis_val)
-precision_val = precision_score(Y_val_sepsi, t_sepsis_val)
-recall_val = recall_score(Y_val_sepsi, t_sepsis_val)
-f1_val = f1_score(Y_val_sepsi, t_sepsis_val)
-auprc_val = average_precision_score(Y_val_sepsi, p_sepsis_val)
+    punteggi_cascade_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_sepsis_test.flatten())
+    print("Media utilita' clinica Cascade Test set:", punteggi_cascade_test)
 
-accuracy_test = accuracy_score(Y_test_sepsi, t_sepsis_test)
-precision_test = precision_score(Y_test_sepsi, t_sepsis_test)
-recall_test = recall_score(Y_test_sepsi, t_sepsis_test)
-f1_test = f1_score(Y_test_sepsi, t_sepsis_test)
-auprc_test = average_precision_score(Y_test_sepsi, p_sepsis_test)
+    risultati_multi_run["AUROC"].append(auroc_sepsis_test)
+    risultati_multi_run["AUROC_infezione"].append(auroc_inf_test)
+    risultati_multi_run["AUROC_organo"].append(auroc_org_test)
+    risultati_multi_run["AUPRC"].append(auprc_test)
+    risultati_multi_run["Accuracy"].append(accuracy_test)
+    risultati_multi_run["Precision"].append(precision_test)
+    risultati_multi_run["Recall"].append(recall_test)
+    risultati_multi_run["F1 Score"].append(f1_test)
+    risultati_multi_run["Utilita"].append(punteggi_cascade_test)
 
-print("\n---------- Validation Set ----------")
-print("\nCascade:")
-print("AUROC:", auroc_sepsis, "\nAUPRC:", auprc_val, "\nAccuracy:", accuracy_val, "\nPrecision:", precision_val, "\nRecall:", recall_val, "\nF1 Score:", f1_val)
+    # Explainable AI SHAP per il modello multitask Cascade
+    model_cpu = model.to("cpu")
+    model_cpu.eval()
 
-punteggi_cascade_val = normalizza_punteggio(val_set["hours_to_sepsis"], val_set["is_sepsis"], t_sepsis_val.flatten())
-print("Utilita' clinica normalizzata Multitask Cascade:", punteggi_cascade_val)
+    class WrapperOutput(nn.Module):
+        def __init__(self, modello, indice_output):
+            super().__init__()
+            self.modello = modello
+            self.indice_output = indice_output  # 0=sepsis, 1=inf, 2=org
 
-print("\n---------- Test Set ----------")
-print("\nCascade Test Set:")
-print("AUROC sepsi:", auroc_sepsis_test)
-print("AUROC infezione:", auroc_inf_test)
-print("AUROC organo:", auroc_org_test)
-print("AUPRC sepsi:", auprc_test)
-print("Accuracy sepsi:", accuracy_test)
-print("Precision sepsi:", precision_test)
-print("Recall sepsi:", recall_test)
-print("F1 Score sepsi:", f1_test)
+        def forward(self, x):
+            outputs = self.modello(x)  # tupla (p_sepsis, p_inf, p_org)
+            return outputs[self.indice_output]
 
-punteggi_cascade_test = normalizza_punteggio(test_set["hours_to_sepsis"], test_set["is_sepsis"], t_sepsis_test.flatten())
-print("Media utilita' clinica Cascade Test set:", punteggi_cascade_test)
+    # background campionato casualmente (non le prime 100 righe fisse),
+    # random_state FISSO a 42 (non seed_run): stesso background per ogni seed,
+    # così le differenze tra i plot dipendono solo dal modello
+    idx_bg = np.random.RandomState(42).choice(X_train_tensor.shape[0], size=100, replace=False)
+    background = X_train_tensor[idx_bg].to("cpu")
 
-print("\n--- Risultati Train Set (confronto overfitting) ---")
-print("AUROC sepsi:", auroc_sepsis_train, " vs validation:", auroc_sepsis)
-print("AUROC infezione:", auroc_inf_train, " vs validation:", auroc_inf)
-print("AUROC organo:", auroc_org_train, " vs validation:", auroc_org)
+    rng_shap = np.random.RandomState(42)
+    test_sample_idx = rng_shap.choice(len(X_test_tensor), size=500, replace=False)
+    test_sample = X_test_tensor[test_sample_idx].to("cpu")
 
-# Explainable AI SHAP per il modello multitask Cascata
-model_cpu = model.to("cpu")
-model_cpu.eval()
+    nomi_task = ["sepsis", "infezione", "organo"]
 
-# il modello ha 3 output (p_sepsis, p_inf, p_org)
-# uno per ciascun output, perché SHAP lavora su modelli con un solo output alla volta
-class WrapperOutput(nn.Module):
-    def __init__(self, modello, indice_output):
-        super().__init__()
-        self.modello = modello
-        self.indice_output = indice_output  # 0=sepsis, 1=inf, 2=org
+    for indice_output, nome_task in enumerate(nomi_task):
+        print(f"\nCalcolo SHAP per il task: {nome_task} (seed {seed_run})")
 
-    def forward(self, x):
-        outputs = self.modello(x)  # tupla (p_sepsis, p_inf, p_org)
-        return outputs[self.indice_output]
+        wrapper = WrapperOutput(model_cpu, indice_output)
+        explainer = shap.GradientExplainer(wrapper, background)
+        shap_values = explainer.shap_values(test_sample)
 
-background = X_train_tensor[:100].to("cpu")
-rng_shap = np.random.RandomState(42)
-test_sample_idx = rng_shap.choice(len(X_test_tensor), size=500, replace=False)
-test_sample = X_test_tensor[test_sample_idx].to("cpu")
-test_sample_df = pd.DataFrame(test_sample.numpy(), columns=feature_cols)
+        if isinstance(shap_values, list):
+            shap_values = shap_values[0]
+        shap_values = np.array(shap_values).reshape(len(test_sample), len(feature_cols))
 
-nomi_task = ["sepsis", "infezione", "organo"]
+        importanza_media = np.abs(shap_values).mean(axis=0)
+        ordine = np.argsort(importanza_media)[::-1]
+        feature_ordinate = [feature_cols[i] for i in ordine]
+        valori_ordinati = importanza_media[ordine]
 
-for indice_output, nome_task in enumerate(nomi_task):
-    print(f"\nCalcolo SHAP per il task: {nome_task}")
+        plt.figure(figsize=(8, 10))
+        plt.barh(feature_ordinate[:20][::-1], valori_ordinati[:20][::-1])
+        plt.xlabel("Importanza media |valore SHAP|")
+        plt.title(f"Multitask Cascade - Importanza feature per task: {nome_task} (seed {seed_run})")
+        plt.tight_layout()
+        plt.savefig(f"Cascade_{nome_task}_{seed_run}.png", dpi=150)
+        plt.close()
 
-    wrapper = WrapperOutput(model_cpu, indice_output)
-    explainer = shap.GradientExplainer(wrapper, background)
-    shap_values = explainer.shap_values(test_sample)
+    print(f"\nGrafici SHAP multitask Cascade salvati per tutti e 3 i task (seed {seed_run}).")
 
-    if isinstance(shap_values, list):
-        shap_values = shap_values[0]
-    shap_values = np.array(shap_values).reshape(len(test_sample), len(feature_cols))
-
-    importanza_media = np.abs(shap_values).mean(axis=0)
-    ordine = np.argsort(importanza_media)[::-1]
-    feature_ordinate = [feature_cols[i] for i in ordine]
-    valori_ordinati = importanza_media[ordine]
-
-    plt.figure(figsize=(8, 10))
-    plt.barh(feature_ordinate[:20][::-1], valori_ordinati[:20][::-1])
-    plt.xlabel("Importanza media |valore SHAP|")
-    plt.title(f"Multitask Cascade - Importanza feature per task: {nome_task}")
-    plt.tight_layout()
-    plt.savefig(f"Cascade_{nome_task}.png", dpi=150)
-    plt.close()
-
-print("\nGrafici SHAP multitask Cascade salvati per tutti e 3 i task.")
+print(f"\n\n========== RISULTATI FINALI CASCADE: MEDIA +/- DEV. STANDARD SU {len(seeds)} SEED ==========")
+for chiave, valori in risultati_multi_run.items():
+    media = np.mean(valori)
+    std = np.std(valori)
+    print(f"{chiave}: {media:.4f} +/- {std:.4f}")
